@@ -28,7 +28,8 @@ A self-hosted web application that fires filetype dork queries at multiple searc
 │  [✓] ECU Tunes  ▶    │  tune.hpt          forum..   HPT   Bing(crawled) Copy   │
 │  [ ] Archives   ▶    │  map.bin           site.com  BIN   DDG(crawled)  Copy   │
 │                      │  report.pdf        gov.uk    PDF   Archive       Copy   │
-│  [  Search  ]        │  [ Filter… ] [Sort ▾] [⬇ CSV] [⬇ URLs]                  │
+│  [⊙] Proxies    ▶    │  [ Filter… ] [Sort ▾] [⬇ CSV] [⬇ URLs] [⬇ JSON]         │
+│  [  Search  ]        │  Proxies: 142 active, 3 burned                           │
 └──────────────────────┴──────────────────────────────────────────────────────────┘
 ```
 
@@ -83,11 +84,33 @@ A real-time status grid appears the moment you hit Search, showing every active 
 
 A separate crawl progress bar shows pages visited during Phase 2. The panel collapses automatically when everything finishes.
 
-### Rate-Limit Detection
+### Rate-Limit Detection & Proxy Rotation
 When Bing, DDG, Yahoo, or other scraped engines return a `429`, `403`, CAPTCHA page, or known block phrase:
 - The engine row updates to **"Rate limited"** in red
 - An orange **toast notification** pops up in the bottom-right corner (auto-dismisses after 5 s)
 - Any results collected before the block are still kept
+- If proxies are loaded, the blocked proxy is **automatically burned** and the request retries through the next one
+
+#### Built-in Proxy Pool
+Open the **Proxies** panel in the sidebar to load a pool of proxies. The tool rotates through them automatically — one click fetches thousands of fresh public proxies:
+
+| Button | Source | Proxies fetched |
+|---|---|---|
+| **⬇ HTTP** | TheSpeedX/SOCKS-List `http.txt` | ~2,800+ |
+| **⬇ SOCKS4** | TheSpeedX/SOCKS-List `socks4.txt` | ~1,000+ |
+| **⬇ SOCKS5** | TheSpeedX/SOCKS-List `socks5.txt` | ~2,100+ |
+
+You can also paste your own proxies manually — one per line, any format:
+```
+1.2.3.4:8080                    # bare host:port → http:// auto-added
+http://user:pass@1.2.3.4:8080
+socks5://1.2.3.4:1080
+socks4://1.2.3.4:1080
+```
+
+During a search the live panel shows **Proxies: N active, M burned** in real time. Burned proxies are permanently removed from the pool for that session. SOCKS4/5 requires the `requests[socks]` package (included in `requirements.txt`).
+
+> Free public proxies are unreliable — many will be slow or dead. For serious scraping, supply your own paid proxies.
 
 ### Filetype Dork Queries
 Every search is constructed as `filetype:<ext> <your query>` — the standard operator recognised by Bing, Yahoo, DuckDuckGo, and Google to bias results toward pages mentioning that file type.
@@ -208,32 +231,8 @@ Expand the **Optional API credentials** panel in the sidebar to unlock additiona
 
 Credentials are never stored — they only exist for the duration of your browser session.
 
-### Proxy Support
-Expand the **Proxies** panel in the sidebar to route search requests through proxies. This is most useful when engines start rate-limiting you — burned proxies are automatically removed from rotation and the next one is tried.
-
-**Auto-fetch public lists** — three buttons fetch fresh proxy lists from [TheSpeedX/SOCKS-List](https://github.com/TheSpeedX/SOCKS-List) with one click:
-
-| Button | Source list | Scheme added |
-|---|---|---|
-| **⬇ HTTP** | `http.txt` | `http://` |
-| **⬇ SOCKS4** | `socks4.txt` | `socks4://` |
-| **⬇ SOCKS5** | `socks5.txt` | `socks5://` |
-
-Clicking multiple buttons appends and deduplicates, so you can mix types. The count badge on the summary shows how many proxies are loaded.
-
-**Manual entry** — paste proxies directly into the textarea, one per line. Supported formats:
-
-```
-1.2.3.4:8080                    # bare host:port (http:// auto-added)
-http://1.2.3.4:8080
-http://user:pass@1.2.3.4:8080   # with auth
-socks5://1.2.3.4:1080
-socks4://1.2.3.4:1080
-```
-
-During a search the live panel header shows **"Proxies: N active, M burned"** in real time. SOCKS proxies require `pip install requests[socks]` (already in `requirements.txt`).
-
-> **Note:** Free public proxies are unreliable — many will be slow or dead. The tool burns bad ones automatically, so quality improves as the pool shrinks. For serious use, supply your own paid proxies.
+### Proxy Configuration
+See the **[Rate-Limit Detection & Proxy Rotation](#rate-limit-detection--proxy-rotation)** section in Features above for full details on proxy formats, auto-fetch buttons, and burn behaviour.
 
 ---
 
