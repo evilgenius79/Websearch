@@ -193,6 +193,7 @@ Turning off **Deep crawl** skips Phase 2 entirely — useful if you only want to
 |---|---|
 | **⬇ CSV** | Comma-separated file with URL, filename, domain, type, engine, snippet |
 | **⬇ URLs** | Plain text — one URL per line, ready for `wget -i` or a download manager |
+| **⬇ JSON** | Full JSON array of all result objects — useful for scripting or further processing |
 
 Export respects the active filter — only visible rows are exported.
 
@@ -206,6 +207,33 @@ Expand the **Optional API credentials** panel in the sidebar to unlock additiona
 | SearXNG Instance URL | URL of any public or self-hosted SearXNG instance (e.g. `https://searx.be`) |
 
 Credentials are never stored — they only exist for the duration of your browser session.
+
+### Proxy Support
+Expand the **Proxies** panel in the sidebar to route search requests through proxies. This is most useful when engines start rate-limiting you — burned proxies are automatically removed from rotation and the next one is tried.
+
+**Auto-fetch public lists** — three buttons fetch fresh proxy lists from [TheSpeedX/SOCKS-List](https://github.com/TheSpeedX/SOCKS-List) with one click:
+
+| Button | Source list | Scheme added |
+|---|---|---|
+| **⬇ HTTP** | `http.txt` | `http://` |
+| **⬇ SOCKS4** | `socks4.txt` | `socks4://` |
+| **⬇ SOCKS5** | `socks5.txt` | `socks5://` |
+
+Clicking multiple buttons appends and deduplicates, so you can mix types. The count badge on the summary shows how many proxies are loaded.
+
+**Manual entry** — paste proxies directly into the textarea, one per line. Supported formats:
+
+```
+1.2.3.4:8080                    # bare host:port (http:// auto-added)
+http://1.2.3.4:8080
+http://user:pass@1.2.3.4:8080   # with auth
+socks5://1.2.3.4:1080
+socks4://1.2.3.4:1080
+```
+
+During a search the live panel header shows **"Proxies: N active, M burned"** in real time. SOCKS proxies require `pip install requests[socks]` (already in `requirements.txt`).
+
+> **Note:** Free public proxies are unreliable — many will be slow or dead. The tool burns bad ones automatically, so quality improves as the pool shrinks. For serious use, supply your own paid proxies.
 
 ---
 
@@ -241,22 +269,31 @@ The frontend picks it up automatically — no template changes needed.
 
 ### Adding a New Search Engine
 
-1. Write a function returning `(direct_results, pages_to_crawl)`:
+1. Write a function returning `(direct_results, pages_to_crawl)`. Accept `proxy_manager` so the engine participates in proxy rotation:
 ```python
-def search_myengine(query: str, filetypes: list[str], max_results: int) -> tuple[list[dict], list[dict]]:
+def search_myengine(
+    query: str,
+    filetypes: list[str],
+    max_results: int,
+    proxy_manager: "ProxyManager | None" = None,
+) -> tuple[list[dict], list[dict]]:
     results, page_hits, seen = [], [], set()
-    # ... scrape / call API ...
-    if is_direct_link(url, [ft]):
-        results.append(make_result(url, title, snippet, "My Engine", ft))
-    else:
-        page_hits.append(make_page_hit(url, title, snippet, "My Engine", ft))
+    for ft in filetypes:
+        dork = f"filetype:{ft} {query}"
+        r = _req("GET", "https://myengine.com/search",
+                 proxy_manager=proxy_manager, engine="My Engine",
+                 params={"q": dork}, headers=get_headers(), timeout=12)
+        # parse r.text with BeautifulSoup ...
+        if is_direct_link(url, [ft]):
+            results.append(make_result(url, title, snippet, "My Engine", ft))
+        else:
+            page_hits.append(make_page_hit(url, title, snippet, "My Engine", ft))
     return results, page_hits
 ```
 
 2. Register it in the `TASKS` dict inside the `/search` route:
 ```python
-if "myengine" in engines:
-    TASKS["myengine"] = lambda: search_myengine(query, filetypes, max_results)
+TASKS["myengine"] = lambda: search_myengine(query, filetypes, max_results, pm)
 ```
 
 3. Add a chip to `templates/index.html`:
@@ -309,16 +346,16 @@ Browser  ──POST /search──►  Flask app
 
 The `/search` route streams [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) so the browser receives results in real time without polling:
 
-| Event | When fired | Payload |
+| Event | When fired | Key payload fields |
 |---|---|---|
-| `engines_registered` | Before search starts | List of active engine names |
-| `engine_start` | Thread submitted | Engine name |
-| `engine_done` | Engine thread finished | Direct results + page URLs + counts |
-| `engine_error` | Engine threw exception | Error message, `rate_limited` flag |
-| `crawl_start` | Phase 2 begins | Total pages to crawl |
-| `crawl_progress` | Every 3 pages crawled | New links found, progress counts |
-| `crawl_done` | All pages visited | Final crawl count |
-| `done` | Everything complete | Grand total |
+| `engines_registered` | Before search starts | `engines` — list of active engine names |
+| `engine_start` | Thread submitted | `engine` |
+| `engine_done` | Engine thread finished | `results`, `count`, `pages`, `total`, `proxies_active`, `proxies_burned` |
+| `engine_error` | Engine threw exception | `error`, `rate_limited`, `proxies_active`, `proxies_burned` |
+| `crawl_start` | Phase 2 begins | `page_count` |
+| `crawl_progress` | Every 3 pages crawled | `results`, `crawled`, `of`, `total` |
+| `crawl_done` | All pages visited | `crawled`, `total` |
+| `done` | Everything complete | `total` |
 
 ---
 
@@ -328,6 +365,7 @@ The `/search` route streams [Server-Sent Events](https://developer.mozilla.org/e
 |---|---|
 | `flask` | Web framework, template rendering, streaming responses |
 | `requests` | HTTP client for engine queries and page crawling |
+| `requests[socks]` | Adds SOCKS4/5 proxy support via PySocks |
 | `beautifulsoup4` | HTML parsing for scraped engines and crawled pages |
 | `lxml` | Fast HTML/XML parser backend for BeautifulSoup |
 
@@ -335,7 +373,7 @@ The `/search` route streams [Server-Sent Events](https://developer.mozilla.org/e
 
 ## Notes & Limitations
 
-- **Rate limiting** — Search engines may temporarily block repeated queries. Random delays (`jitter()`) are built in. Reduce `max_results`, disable individual engines, or wait a few minutes if you hit blocks.
+- **Rate limiting** — Search engines may temporarily block repeated queries. Random delays (`jitter()`) are built in. Use the Proxies panel to auto-fetch and rotate through public proxies when engines block you. Reduce `max_results` or disable engines if blocks persist.
 - **Scraper fragility** — HTML-scraped engines (Bing, DDG, Yahoo, etc.) may break if those sites change their page markup. API-based engines (Common Crawl, Internet Archive, Google CSE) are more stable.
 - **Crawl depth** — Phase 2 only follows links on the direct result pages. It does not recursively crawl (no second-level pages). If a file is two clicks deep from a search result it won't be found.
 - **JavaScript-rendered pages** — The crawler uses plain `requests` + BeautifulSoup and does not execute JavaScript. Pages that load their download links via JS won't be crawled successfully.
