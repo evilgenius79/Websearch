@@ -156,14 +156,12 @@ def get_headers(referer: str = "https://www.google.com") -> dict:
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        # Do NOT set Accept-Encoding — let requests handle it so it only
+        # advertises encodings it can actually decompress (avoids brotli garbage)
         "Referer": referer,
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
     }
 
 
@@ -349,6 +347,8 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> tupl
                 if found == 0:
                     break
                 jitter()
+            except RateLimitedError:
+                raise  # propagate so the route can report it
             except Exception:
                 break
 
@@ -362,17 +362,12 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
         dork = f'filetype:{ft} {query}'
         try:
             session = requests.Session()
-            r0 = session.get(
-                "https://duckduckgo.com/",
-                params={"q": dork},
-                headers=get_headers("https://duckduckgo.com"),
-                timeout=12,
-            )
-
-            r = session.get(
+            # POST to the HTML lite endpoint (GET ignores the data= body)
+            r = session.post(
                 "https://html.duckduckgo.com/html/",
                 data={"q": dork, "b": "", "kl": "us-en"},
-                headers={**get_headers("https://duckduckgo.com"), "Content-Type": "application/x-www-form-urlencoded"},
+                headers={**get_headers("https://duckduckgo.com"),
+                         "Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15,
             )
             _check_response(r, "DuckDuckGo")
@@ -404,6 +399,8 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
                 else:
                     pages.append(make_page_hit(href, title, snippet, "DuckDuckGo", ft))
             jitter(1.0, 2.5)
+        except RateLimitedError:
+            raise
         except Exception:
             continue
 
@@ -461,6 +458,8 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> tup
                 if found == 0:
                     break
                 jitter()
+            except RateLimitedError:
+                raise
             except Exception:
                 break
 
@@ -522,9 +521,10 @@ def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100)
         idx_r = requests.get("https://index.commoncrawl.org/collinfo.json", timeout=10)
         indexes = [entry["cdx-api"] for entry in idx_r.json()[:3]]
     except Exception:
+        # Fallback — keep updated; check index.commoncrawl.org/collinfo.json
         indexes = [
-            "https://index.commoncrawl.org/CC-MAIN-2024-10-index",
-            "https://index.commoncrawl.org/CC-MAIN-2023-50-index",
+            "https://index.commoncrawl.org/CC-MAIN-2026-12-index",
+            "https://index.commoncrawl.org/CC-MAIN-2026-08-index",
         ]
 
     per_type = max(10, max_results // max(len(filetypes), 1))
@@ -537,9 +537,9 @@ def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100)
                     "output": "json",
                     "limit": per_type,
                     "fl": "url,status,timestamp,mime",
-                    "filter": "=status:200",
+                    "filter": "status:200",   # no leading '=' — CDX API syntax
                 }
-                r = requests.get(idx_url, params=params, timeout=20)
+                r = requests.get(idx_url, params=params, timeout=25)
                 if r.status_code != 200:
                     continue
 
@@ -570,7 +570,7 @@ def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100)
 
 def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
     """Search the Internet Archive for publicly available files."""
-    results, seen = [], set()
+    results, page_hits, seen = [], [], set()
 
     MEDIA_MAP = {
         "pdf": ("texts", "PDF"),
@@ -604,7 +604,7 @@ def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) 
             r = requests.get(
                 "https://archive.org/advancedsearch.php",
                 params=params,
-                headers=get_headers("https://archive.org"),
+                headers={"User-Agent": random.choice(USER_AGENTS)},
                 timeout=15,
             )
             if r.status_code != 200:
@@ -615,13 +615,15 @@ def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) 
                 ident = doc.get("identifier", "")
                 if not ident:
                     continue
-                # Fetch the item's file listing to get exact direct URL
-                meta_url = f"https://archive.org/download/{ident}/{ident}.{ft}"
-                if meta_url not in seen:
-                    seen.add(meta_url)
-                    results.append(
-                        make_result(
-                            meta_url,
+                # The /download/ listing page has all the actual file links —
+                # send it to the crawler so Phase 2 finds the real .ft file
+                listing_url = f"https://archive.org/download/{ident}/"
+                item_url    = f"https://archive.org/details/{ident}"
+                if listing_url not in seen:
+                    seen.add(listing_url)
+                    page_hits.append(
+                        make_page_hit(
+                            listing_url,
                             doc.get("title", ident),
                             f"Internet Archive — {fmt}",
                             "Internet Archive",
@@ -632,7 +634,7 @@ def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) 
         except Exception:
             continue
 
-    return results, []  # Archive returns direct URLs
+    return results, page_hits  # let the crawler find exact file URLs
 
 
 def search_searxng(
