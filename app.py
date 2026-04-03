@@ -8,7 +8,9 @@ import concurrent.futures
 import json
 import random
 import re
+import threading
 import time
+from collections import deque
 from urllib.parse import urlencode, urljoin, urlparse, unquote
 
 import requests
@@ -20,6 +22,54 @@ app = Flask(__name__)
 
 class RateLimitedError(Exception):
     """Raised when a search engine returns a rate-limit / CAPTCHA response."""
+
+
+class ProxyManager:
+    """Thread-safe rotating proxy pool. Proxies are burned when they get blocked."""
+
+    def __init__(self, proxy_list: list[str]):
+        self._lock = threading.Lock()
+        self._pool: deque[str] = deque()
+        self._burned: list[str] = []
+        for p in proxy_list:
+            p = p.strip()
+            if p and not p.startswith("#"):
+                if not p.startswith(("http://", "https://", "socks5://", "socks4://")):
+                    p = "http://" + p
+                self._pool.append(p)
+
+    def get_proxies(self) -> dict | None:
+        """Return the next proxy as a requests-compatible dict (rotates on each call)."""
+        with self._lock:
+            if not self._pool:
+                return None
+            p = self._pool[0]
+            self._pool.rotate(-1)
+            return {"http": p, "https": p}
+
+    def burn(self, proxy_url: str) -> None:
+        """Remove a blocked proxy from rotation."""
+        with self._lock:
+            try:
+                self._pool.remove(proxy_url)
+            except ValueError:
+                pass
+            if proxy_url not in self._burned:
+                self._burned.append(proxy_url)
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return len(self._pool)
+
+    @property
+    def burned_count(self) -> int:
+        with self._lock:
+            return len(self._burned)
+
+    def has_proxies(self) -> bool:
+        with self._lock:
+            return bool(self._pool)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -199,6 +249,39 @@ def jitter(lo: float = 0.4, hi: float = 1.2) -> None:
     time.sleep(random.uniform(lo, hi))
 
 
+def _req(
+    method: str,
+    url: str,
+    proxy_manager: "ProxyManager | None" = None,
+    engine: str = "",
+    **kwargs,
+) -> "requests.Response":
+    """HTTP request with optional proxy rotation.
+
+    Automatically calls _check_response(). On a rate-limit hit, burns the
+    current proxy and retries once with the next one (if available).
+    Non-rate-limit exceptions propagate immediately.
+    """
+    max_attempts = 2 if (proxy_manager and proxy_manager.has_proxies()) else 1
+
+    for attempt in range(max_attempts):
+        proxies = proxy_manager.get_proxies() if proxy_manager else None
+        proxy_url = next(iter(proxies.values())) if proxies else None
+        try:
+            r = requests.request(method, url, proxies=proxies, **kwargs)
+            _check_response(r, engine)
+            return r
+        except RateLimitedError:
+            if proxy_url and proxy_manager:
+                proxy_manager.burn(proxy_url)
+            if attempt == max_attempts - 1:
+                raise
+        except Exception:
+            raise
+
+    raise RateLimitedError(f"{engine} blocked on all available proxies")
+
+
 # ---------------------------------------------------------------------------
 # Page crawler – visits search-result pages to find actual file links
 # ---------------------------------------------------------------------------
@@ -223,6 +306,7 @@ def crawl_page_for_links(
     page_title: str = "",
     page_snippet: str = "",
     engine: str = "",
+    proxy_manager: "ProxyManager | None" = None,
 ) -> list[dict]:
     """Visit a single page and extract all <a href> links that end with a target extension."""
     results = []
@@ -231,12 +315,14 @@ def crawl_page_for_links(
         if _should_skip_domain(parsed.netloc):
             return results
 
+        proxies = proxy_manager.get_proxies() if proxy_manager else None
         r = requests.get(
             page_url,
             headers=get_headers(referer=f"{parsed.scheme}://{parsed.netloc}"),
             timeout=10,
             allow_redirects=True,
             stream=True,
+            proxies=proxies,
         )
 
         # Check content-type — only parse HTML
@@ -295,7 +381,7 @@ def crawl_page_for_links(
 # ---------------------------------------------------------------------------
 
 
-def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
     results, pages, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
@@ -306,13 +392,15 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> tupl
         for page in range(page_count):
             try:
                 params = {"q": dork, "first": page * 10 + 1, "count": 10}
-                r = requests.get(
+                r = _req(
+                    "GET",
                     "https://www.bing.com/search",
+                    proxy_manager=proxy_manager,
+                    engine="Bing",
                     params=params,
                     headers=get_headers("https://www.bing.com"),
                     timeout=12,
                 )
-                _check_response(r, "Bing")
                 if r.status_code != 200:
                     break
 
@@ -355,22 +443,23 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> tupl
     return results, pages
 
 
-def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
     results, pages, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
         try:
-            session = requests.Session()
             # POST to the HTML lite endpoint (GET ignores the data= body)
-            r = session.post(
+            r = _req(
+                "POST",
                 "https://html.duckduckgo.com/html/",
+                proxy_manager=proxy_manager,
+                engine="DuckDuckGo",
                 data={"q": dork, "b": "", "kl": "us-en"},
                 headers={**get_headers("https://duckduckgo.com"),
                          "Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15,
             )
-            _check_response(r, "DuckDuckGo")
             if r.status_code != 200:
                 continue
 
@@ -407,7 +496,7 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
     return results, pages
 
 
-def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
     results, page_hits, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
@@ -418,13 +507,15 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> tup
         for page in range(page_count):
             try:
                 params = {"p": dork, "b": page * 10 + 1, "pz": 10}
-                r = requests.get(
+                r = _req(
+                    "GET",
                     "https://search.yahoo.com/search",
+                    proxy_manager=proxy_manager,
+                    engine="Yahoo",
                     params=params,
                     headers=get_headers("https://search.yahoo.com"),
                     timeout=12,
                 )
-                _check_response(r, "Yahoo")
                 if r.status_code != 200:
                     break
 
@@ -680,7 +771,7 @@ def search_searxng(
     return results, page_hits
 
 
-def search_startpage(query: str, filetypes: list[str], max_results: int = 40) -> tuple[list[dict], list[dict]]:
+def search_startpage(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
     """Search Startpage (Google proxy) for files."""
     results, page_hits, seen = [], [], set()
 
@@ -688,8 +779,11 @@ def search_startpage(query: str, filetypes: list[str], max_results: int = 40) ->
         dork = f'filetype:{ft} {query}'
         try:
             params = {"q": dork, "language": "english", "cat": "web"}
-            r = requests.get(
+            r = _req(
+                "GET",
                 "https://www.startpage.com/sp/search",
+                proxy_manager=proxy_manager,
+                engine="Startpage",
                 params=params,
                 headers=get_headers("https://www.startpage.com"),
                 timeout=15,
@@ -723,7 +817,7 @@ def search_startpage(query: str, filetypes: list[str], max_results: int = 40) ->
     return results, page_hits
 
 
-def search_mojeek(query: str, filetypes: list[str], max_results: int = 40) -> tuple[list[dict], list[dict]]:
+def search_mojeek(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
     """Search Mojeek (independent index)."""
     results, page_hits, seen = [], [], set()
 
@@ -731,8 +825,11 @@ def search_mojeek(query: str, filetypes: list[str], max_results: int = 40) -> tu
         dork = f'filetype:{ft} {query}'
         try:
             params = {"q": dork, "fmt": "10"}
-            r = requests.get(
+            r = _req(
+                "GET",
                 "https://www.mojeek.com/search",
+                proxy_manager=proxy_manager,
+                engine="Mojeek",
                 params=params,
                 headers=get_headers("https://www.mojeek.com"),
                 timeout=12,
@@ -813,6 +910,10 @@ def search():
     google_cx = data.get("google_cx", "").strip()
     searxng_url = data.get("searxng_url", "").strip()
 
+    # Optional proxy list
+    raw_proxies = [p.strip() for p in data.get("proxies", []) if isinstance(p, str) and p.strip()]
+    proxy_manager: ProxyManager | None = ProxyManager(raw_proxies) if raw_proxies else None
+
     # Validate before opening the stream
     if not query:
         return jsonify({"error": "Query is required"}), 400
@@ -821,12 +922,13 @@ def search():
     if not engines:
         return jsonify({"error": "Select at least one search engine"}), 400
 
+    pm = proxy_manager  # short alias for lambda capture
     TASKS = {
-        "bing":        lambda: search_bing(query, filetypes, max_results),
-        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results),
-        "yahoo":       lambda: search_yahoo(query, filetypes, max_results),
-        "startpage":   lambda: search_startpage(query, filetypes, max_results),
-        "mojeek":      lambda: search_mojeek(query, filetypes, max_results),
+        "bing":        lambda: search_bing(query, filetypes, max_results, pm),
+        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results, pm),
+        "yahoo":       lambda: search_yahoo(query, filetypes, max_results, pm),
+        "startpage":   lambda: search_startpage(query, filetypes, max_results, pm),
+        "mojeek":      lambda: search_mojeek(query, filetypes, max_results, pm),
         "commoncrawl": lambda: search_commoncrawl(query, filetypes, max_results),
         "archive":     lambda: search_archive_org(query, filetypes, max_results),
     }
@@ -878,6 +980,11 @@ def search():
                     if page_count:
                         status_label += f", {page_count} pages to crawl"
 
+                    proxy_info = (
+                        {"proxies_active": proxy_manager.active,
+                         "proxies_burned": proxy_manager.burned_count}
+                        if proxy_manager else {}
+                    )
                     yield _sse({
                         "type":    "engine_done",
                         "engine":  eng,
@@ -885,14 +992,21 @@ def search():
                         "pages":   page_count,
                         "results": new_results,
                         "total":   total,
+                        **proxy_info,
                     })
                 except Exception as exc:
+                    proxy_info = (
+                        {"proxies_active": proxy_manager.active,
+                         "proxies_burned": proxy_manager.burned_count}
+                        if proxy_manager else {}
+                    )
                     yield _sse({
                         "type":        "engine_error",
                         "engine":      eng,
                         "error":       str(exc),
                         "rate_limited": _looks_rate_limited(exc),
                         "total":       total,
+                        **proxy_info,
                     })
 
         # ── Phase 2: crawl result pages for actual file links ────────────
@@ -925,6 +1039,7 @@ def search():
                         p.get("title", ""),
                         p.get("snippet", ""),
                         p.get("engine", ""),
+                        proxy_manager,
                     ): p
                     for p in crawl_queue
                 }

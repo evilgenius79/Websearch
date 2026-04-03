@@ -249,6 +249,29 @@
       outline: none;
     }
     details.creds input:focus { border-color: var(--blue); }
+    details.creds textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .4rem .7rem;
+      font-size: .78rem;
+      font-family: var(--mono);
+      outline: none;
+      resize: vertical;
+      min-height: 80px;
+      line-height: 1.5;
+    }
+    details.creds textarea:focus { border-color: var(--blue); }
+    details.creds textarea::placeholder { color: var(--muted); }
+    .proxy-status {
+      font-size: .72rem;
+      color: var(--muted);
+      margin-top: .3rem;
+    }
+    .proxy-status .ps-active { color: #56d364; font-weight: 600; }
+    .proxy-status .ps-burned { color: #f0883e; font-weight: 600; }
 
     /* Buttons */
     .btn {
@@ -831,6 +854,21 @@
       </div>
     </details>
 
+    <!-- Proxy list -->
+    <details class="creds">
+      <summary>Proxies <span id="proxy-count-badge" style="display:none;margin-left:.4rem;background:rgba(31,111,235,.2);color:var(--blue-h);border:1px solid rgba(31,111,235,.35);border-radius:10px;font-size:.68rem;padding:.05rem .45rem;font-weight:700;"></span></summary>
+      <div class="cred-fields">
+        <div>
+          <label>One proxy per line — used to rotate when engines rate-limit you</label>
+          <textarea id="proxy-list" placeholder="http://1.2.3.4:8080&#10;http://user:pass@5.6.7.8:3128&#10;socks5://9.10.11.12:1080" oninput="updateProxyBadge()"></textarea>
+        </div>
+        <div class="proxy-status" id="proxy-runtime-status" style="display:none;">
+          Proxies: <span class="ps-active" id="ps-active">0</span> active,
+          <span class="ps-burned" id="ps-burned">0</span> burned
+        </div>
+      </div>
+    </details>
+
     <!-- Search button -->
     <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
@@ -862,6 +900,7 @@
         <div class="lp-spinner"></div>
         <span class="lp-label" id="lp-label">Starting search…</span>
         <span class="lp-total" id="lp-total"></span>
+        <span id="lp-proxy-status" style="display:none;font-size:.72rem;color:var(--muted);margin-left:auto;white-space:nowrap;"></span>
       </div>
       <div id="live-engine-rows"></div>
       <div id="crawl-section">
@@ -896,6 +935,7 @@
       <div id="engine-stats"></div>
       <button class="btn-sm" onclick="exportCSV()">⬇ CSV</button>
       <button class="btn-sm" onclick="exportURLs()">⬇ URLs</button>
+      <button class="btn-sm" onclick="exportJSON()">⬇ JSON</button>
     </div>
 
     <!-- Table -->
@@ -998,6 +1038,41 @@ function clearAllFt() {
   document.querySelectorAll('.ft-group-check').forEach(c => { c.classList.remove('checked'); c.textContent = '☐'; });
 }
 
+/* ── Proxy badge ──────────────────────────────────────────────────────── */
+function getProxies() {
+  return document.getElementById('proxy-list').value
+    .split('\n')
+    .map(p => p.trim())
+    .filter(p => p && !p.startsWith('#'));
+}
+
+function updateProxyBadge() {
+  const count = getProxies().length;
+  const badge = document.getElementById('proxy-count-badge');
+  if (count > 0) {
+    badge.textContent = count;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function updateProxyStatus(active, burned) {
+  if (active == null) return;
+  const el = document.getElementById('proxy-runtime-status');
+  el.style.display = '';
+  document.getElementById('ps-active').textContent = active;
+  document.getElementById('ps-burned').textContent = burned || 0;
+  // Live panel
+  const lpProxy = document.getElementById('lp-proxy-status');
+  if (active != null) {
+    lpProxy.style.display = '';
+    const burnedN = burned || 0;
+    lpProxy.textContent = `Proxies: ${active} active${burnedN > 0 ? ', ' + burnedN + ' burned' : ''}`;
+    lpProxy.style.color = burnedN > 0 ? '#f0883e' : 'var(--muted)';
+  }
+}
+
 /* ── Getters ──────────────────────────────────────────────────────────── */
 function getQuery()    { return document.getElementById('query-input').value.trim(); }
 function getEngines()  { return [...document.querySelectorAll('.engine-chip.active')].map(c => c.dataset.engine); }
@@ -1028,7 +1103,13 @@ async function runSearch() {
     google_api_key: document.getElementById('google-api-key').value.trim(),
     google_cx:      document.getElementById('google-cx').value.trim(),
     searxng_url:    document.getElementById('searxng-url').value.trim(),
+    proxies:        getProxies(),
   };
+
+  // Reset proxy runtime display
+  document.getElementById('proxy-runtime-status').style.display = 'none';
+  document.getElementById('lp-proxy-status').style.display = 'none';
+  if (payload.proxies.length > 0) updateProxyStatus(payload.proxies.length, 0);
 
   try {
     const res = await fetch('/search', {
@@ -1099,6 +1180,7 @@ function handleSSE(ev) {
       }
       updateLPLabel(ev.total);
       updateLiveTotals(ev.total);
+      updateProxyStatus(ev.proxies_active, ev.proxies_burned);
       tickProgress();
       break;
     }
@@ -1107,6 +1189,7 @@ function handleSSE(ev) {
       setEngineState(ev.engine, 'error', ev.rate_limited ? 'Rate limited' : 'Error');
       if (ev.rate_limited) showRateLimitToast(ev.engine);
       updateLiveTotals(ev.total);
+      updateProxyStatus(ev.proxies_active, ev.proxies_burned);
       tickProgress();
       break;
 
@@ -1461,6 +1544,11 @@ function exportURLs() {
   const rows = getVisibleResults();
   const content = rows.map(r => r.url).join('\n');
   download('file-search-urls.txt', content, 'text/plain');
+}
+
+function exportJSON() {
+  const rows = getVisibleResults();
+  download('file-search-results.json', JSON.stringify(rows, null, 2), 'application/json');
 }
 
 function download(filename, content, mime) {
