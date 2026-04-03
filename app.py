@@ -13,9 +13,13 @@ from urllib.parse import urlencode, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 app = Flask(__name__)
+
+
+class RateLimitedError(Exception):
+    """Raised when a search engine returns a rate-limit / CAPTCHA response."""
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -133,6 +137,20 @@ ALL_EXTENSIONS = {ext for group in FILE_EXTENSIONS.values() for ext in group}
 # ---------------------------------------------------------------------------
 
 
+_BLOCK_CODES    = {429, 403, 503, 999}
+_BLOCK_SNIPPETS = ("captcha", "robot", "unusual traffic", "rate limit",
+                   "too many requests", "access denied", "blocked")
+
+
+def _check_response(r: "requests.Response", engine: str) -> None:
+    """Raise RateLimitedError if the response looks like a block/rate-limit."""
+    if r.status_code in _BLOCK_CODES:
+        raise RateLimitedError(f"{engine} returned HTTP {r.status_code}")
+    body_low = r.text[:2000].lower()
+    if any(phrase in body_low for phrase in _BLOCK_SNIPPETS):
+        raise RateLimitedError(f"{engine} returned a CAPTCHA/block page")
+
+
 def get_headers(referer: str = "https://www.google.com") -> dict:
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -194,6 +212,7 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> list
                     headers=get_headers("https://www.bing.com"),
                     timeout=12,
                 )
+                _check_response(r, "Bing")
                 if r.status_code != 200:
                     break
 
@@ -262,7 +281,7 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
                 headers={**get_headers("https://duckduckgo.com"), "Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15,
             )
-
+            _check_response(r, "DuckDuckGo")
             if r.status_code != 200:
                 continue
 
@@ -319,6 +338,7 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> lis
                     headers=get_headers("https://search.yahoo.com"),
                     timeout=12,
                 )
+                _check_response(r, "Yahoo")
                 if r.status_code != 200:
                     break
 
@@ -685,6 +705,29 @@ def index():
     return render_template("index.html", file_extensions=FILE_EXTENSIONS)
 
 
+def _sse(payload: dict) -> str:
+    """Format a dict as a single SSE data line."""
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+# HTTP status codes that indicate rate-limiting / blocking
+_RATELIMIT_CODES = {429, 403, 503, 999}  # 999 = Yahoo's soft-block code
+_RATELIMIT_PHRASES = ("rate limit", "too many requests", "blocked", "captcha",
+                      "unusual traffic", "access denied", "robot", "automated")
+
+
+def _looks_rate_limited(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitedError):
+        return True
+    msg = str(exc).lower()
+    if any(p in msg for p in _RATELIMIT_PHRASES):
+        return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", 0) in _RATELIMIT_CODES:
+        return True
+    return False
+
+
 @app.route("/search", methods=["POST"])
 def search():
     data = request.get_json(force=True)
@@ -693,11 +736,12 @@ def search():
     engines = data.get("engines", [])
     max_results = min(int(data.get("max_results", 60)), 200)
 
-    # Optional credentials
+    # Optional credentials – extract before generator to avoid request-context issues
     google_api_key = data.get("google_api_key", "").strip()
     google_cx = data.get("google_cx", "").strip()
     searxng_url = data.get("searxng_url", "").strip()
 
+    # Validate before opening the stream
     if not query:
         return jsonify({"error": "Query is required"}), 400
     if not filetypes:
@@ -705,52 +749,74 @@ def search():
     if not engines:
         return jsonify({"error": "Select at least one search engine"}), 400
 
-    all_results: list[dict] = []
-    seen_urls: set[str] = set()
-    engine_stats: dict[str, int] = {}
-
     TASKS = {
-        "bing": lambda: search_bing(query, filetypes, max_results),
-        "duckduckgo": lambda: search_duckduckgo(query, filetypes, max_results),
-        "yahoo": lambda: search_yahoo(query, filetypes, max_results),
-        "startpage": lambda: search_startpage(query, filetypes, max_results),
-        "mojeek": lambda: search_mojeek(query, filetypes, max_results),
+        "bing":        lambda: search_bing(query, filetypes, max_results),
+        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results),
+        "yahoo":       lambda: search_yahoo(query, filetypes, max_results),
+        "startpage":   lambda: search_startpage(query, filetypes, max_results),
+        "mojeek":      lambda: search_mojeek(query, filetypes, max_results),
         "commoncrawl": lambda: search_commoncrawl(query, filetypes, max_results),
-        "archive": lambda: search_archive_org(query, filetypes, max_results),
+        "archive":     lambda: search_archive_org(query, filetypes, max_results),
     }
-
     if "google" in engines and google_api_key and google_cx:
         TASKS["google"] = lambda: search_google_cse(query, filetypes, google_api_key, google_cx, max_results)
-
     if "searxng" in engines and searxng_url:
         TASKS["searxng"] = lambda: search_searxng(query, filetypes, searxng_url, max_results)
 
     active = {k: v for k, v in TASKS.items() if k in engines}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(active) or 1) as pool:
-        future_to_engine = {pool.submit(fn): eng for eng, fn in active.items()}
-        for future in concurrent.futures.as_completed(future_to_engine, timeout=60):
-            eng = future_to_engine[future]
-            try:
-                res = future.result(timeout=5)
-                count = 0
-                for r in res:
-                    url = r["url"]
-                    if url not in seen_urls:
-                        seen_urls.add(url)
-                        all_results.append(r)
-                        count += 1
-                engine_stats[eng] = count
-            except Exception:
-                engine_stats[eng] = 0
+    @stream_with_context
+    def generate():
+        seen_urls: set[str] = set()
+        total = 0
 
-    return jsonify(
-        {
-            "results": all_results,
-            "total": len(all_results),
-            "query": query,
-            "engine_stats": engine_stats,
-        }
+        # Tell the client which engines are about to start
+        yield _sse({"type": "engines_registered", "engines": list(active.keys())})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active) or 1) as pool:
+            future_to_engine = {pool.submit(fn): eng for eng, fn in active.items()}
+
+            # Signal each engine as "running" the moment its future is submitted
+            for eng in active:
+                yield _sse({"type": "engine_start", "engine": eng})
+
+            for future in concurrent.futures.as_completed(future_to_engine, timeout=90):
+                eng = future_to_engine[future]
+                try:
+                    res = future.result(timeout=5)
+                    new_results = []
+                    for r in res:
+                        url = r["url"]
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            new_results.append(r)
+                            total += 1
+                    yield _sse({
+                        "type":    "engine_done",
+                        "engine":  eng,
+                        "count":   len(new_results),
+                        "results": new_results,
+                        "total":   total,
+                    })
+                except Exception as exc:
+                    err_str = str(exc)
+                    yield _sse({
+                        "type":        "engine_error",
+                        "engine":      eng,
+                        "error":       err_str,
+                        "rate_limited": _looks_rate_limited(exc),
+                        "total":       total,
+                    })
+
+        yield _sse({"type": "done", "total": total})
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering if behind a proxy
+        },
     )
 
 

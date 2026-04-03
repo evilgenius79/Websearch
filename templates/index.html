@@ -449,6 +449,35 @@
     }
     .error-banner.visible { display: flex; }
 
+    /* Rate-limit toast */
+    #rl-toast-wrap {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: .5rem;
+      z-index: 999;
+      pointer-events: none;
+    }
+    .rl-toast {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      padding: .6rem 1rem;
+      background: #2d1b0e;
+      border: 1px solid #f0883e;
+      border-radius: var(--radius);
+      color: #f0883e;
+      font-size: .82rem;
+      box-shadow: 0 4px 16px rgba(0,0,0,.4);
+      animation: toastIn .25s ease, toastOut .3s ease 4.7s forwards;
+      pointer-events: auto;
+    }
+    .rl-toast strong { font-weight: 700; }
+    @keyframes toastIn  { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+    @keyframes toastOut { to   { opacity:0; transform:translateY(8px); } }
+
     /* Responsive */
     @media (max-width: 900px) {
       main { grid-template-columns: 1fr; }
@@ -476,6 +505,111 @@
       transition: width .4s ease;
       border-radius: 2px;
     }
+
+    /* ── Live engine status panel ────────────────────────────────────────── */
+    #live-panel {
+      display: none;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    #live-panel.visible { display: block; }
+
+    #live-panel-header {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      padding: .65rem 1rem;
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      font-size: .82rem;
+    }
+    #live-panel-header .lp-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--blue-h);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      flex-shrink: 0;
+    }
+    #live-panel-header .lp-label { flex: 1; color: var(--muted); }
+    #live-panel-header .lp-total { font-weight: 700; color: var(--blue-h); }
+
+    #live-engine-rows {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 0;
+    }
+
+    .er {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      padding: .5rem .9rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      font-size: .8rem;
+      transition: background .2s;
+    }
+    .er:hover { background: var(--surface2); }
+
+    /* icon slot */
+    .er-icon {
+      width: 18px; height: 18px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* pending: dim dot */
+    .er.pending .er-icon::after {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--border);
+      display: block;
+    }
+    /* running: mini spinner */
+    .er.running .er-icon {
+      border: 2px solid var(--border);
+      border-top-color: var(--blue-h);
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+    }
+    /* done: green check */
+    .er.done .er-icon::after {
+      content: '✓';
+      color: #56d364;
+      font-size: .85rem;
+      font-weight: 700;
+    }
+    /* error: red x */
+    .er.error .er-icon::after {
+      content: '✗';
+      color: #ff7b72;
+      font-size: .85rem;
+      font-weight: 700;
+    }
+
+    .er-name {
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+    .er.pending .er-name { color: var(--muted); }
+
+    .er-status {
+      font-size: .72rem;
+      white-space: nowrap;
+    }
+    .er.pending  .er-status { color: var(--muted); }
+    .er.running  .er-status { color: var(--blue-h); }
+    .er.done     .er-status { color: #56d364; }
+    .er.error    .er-status { color: #ff7b72; }
   </style>
 </head>
 <body>
@@ -617,6 +751,16 @@
       <span id="result-count"></span>
     </div>
 
+    <!-- Live engine status panel -->
+    <div id="live-panel">
+      <div id="live-panel-header">
+        <div class="lp-spinner"></div>
+        <span class="lp-label" id="lp-label">Starting search…</span>
+        <span class="lp-total" id="lp-total"></span>
+      </div>
+      <div id="live-engine-rows"></div>
+    </div>
+
     <!-- Error banner -->
     <div class="error-banner" id="error-banner">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -670,6 +814,9 @@
   </section>
 </main>
 
+<!-- Rate-limit toast container (fixed, bottom-right) -->
+<div id="rl-toast-wrap"></div>
+
 <script>
 /* ── State ────────────────────────────────────────────────────────────── */
 let allResults = [];
@@ -714,51 +861,194 @@ async function runSearch() {
   const engines = getEngines();
   const filetypes = getFileTypes();
 
-  if (!query)           { showError('Please enter a search query.'); return; }
-  if (!filetypes.length){ showError('Please select at least one file type.'); return; }
-  if (!engines.length)  { showError('Please select at least one search engine.'); return; }
+  if (!query)            { showError('Please enter a search query.'); return; }
+  if (!filetypes.length) { showError('Please select at least one file type.'); return; }
+  if (!engines.length)   { showError('Please select at least one search engine.'); return; }
 
   clearError();
+  allResults = [];
+  resetLivePanel();
   setSearching(true);
+  startProgress(engines.length);
 
   const payload = {
-    query,
-    filetypes,
-    engines,
-    max_results: getMaxResults(),
+    query, filetypes, engines,
+    max_results:    getMaxResults(),
     google_api_key: document.getElementById('google-api-key').value.trim(),
     google_cx:      document.getElementById('google-cx').value.trim(),
     searxng_url:    document.getElementById('searxng-url').value.trim(),
   };
 
-  animateProgress();
-
   try {
     const res = await fetch('/search', {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body:    JSON.stringify(payload),
     });
 
-    const data = await res.json();
-
     if (!res.ok) {
+      // Non-streaming error (validation failure)
+      const data = await res.json();
       showError(data.error || `HTTP ${res.status}`);
       setSearching(false);
+      hideLivePanel();
       stopProgress();
       return;
     }
 
-    allResults = data.results || [];
-    renderResults(allResults, data.engine_stats || {});
-    setSearching(false, data.total);
-    stopProgress(true);
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process all complete SSE lines in the buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop();          // keep the (possibly incomplete) last fragment
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          handleSSE(JSON.parse(line.slice(6)));
+        } catch { /* malformed chunk — skip */ }
+      }
+    }
 
   } catch (err) {
-    showError('Network error — is the server running? ' + err.message);
+    showError('Network error — is the server running?  ' + err.message);
     setSearching(false);
+    hideLivePanel();
     stopProgress();
   }
+}
+
+/* ── SSE event dispatcher ─────────────────────────────────────────────── */
+function handleSSE(ev) {
+  switch (ev.type) {
+    case 'engines_registered':
+      buildLiveRows(ev.engines);
+      break;
+
+    case 'engine_start':
+      setEngineState(ev.engine, 'running', 'Searching…');
+      updateLPLabel();
+      break;
+
+    case 'engine_done': {
+      const label = ev.count === 0
+        ? 'No results'
+        : `${ev.count} result${ev.count !== 1 ? 's' : ''}`;
+      setEngineState(ev.engine, 'done', label);
+      // Append new results to the table immediately
+      if (ev.results && ev.results.length) {
+        allResults.push(...ev.results);
+        appendRows(ev.results);
+        showTableIfHidden();
+      }
+      updateLPLabel(ev.total);
+      updateLiveTotals(ev.total);
+      tickProgress();
+      break;
+    }
+
+    case 'engine_error':
+      setEngineState(ev.engine, 'error', ev.rate_limited ? 'Rate limited' : 'Error');
+      if (ev.rate_limited) showRateLimitToast(ev.engine);
+      updateLiveTotals(ev.total);
+      tickProgress();
+      break;
+
+    case 'done':
+      finishSearch(ev.total);
+      break;
+  }
+}
+
+/* ── Live panel helpers ───────────────────────────────────────────────── */
+function resetLivePanel() {
+  document.getElementById('live-engine-rows').innerHTML = '';
+  document.getElementById('lp-total').textContent = '';
+  document.getElementById('lp-label').textContent = 'Starting search…';
+  document.getElementById('live-panel').classList.add('visible');
+  // Reset results table
+  document.getElementById('results-body').innerHTML = '';
+  document.getElementById('table-wrap').style.display = 'none';
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('controls-row').classList.remove('visible');
+  document.getElementById('engine-stats').innerHTML = '';
+}
+
+function hideLivePanel() {
+  document.getElementById('live-panel').classList.remove('visible');
+}
+
+function buildLiveRows(engines) {
+  const container = document.getElementById('live-engine-rows');
+  container.innerHTML = engines.map(eng => `
+    <div class="er pending" id="er-${CSS.escape(eng)}">
+      <span class="er-icon"></span>
+      <span class="er-name">${escHtml(eng)}</span>
+      <span class="er-status">Queued</span>
+    </div>`).join('');
+}
+
+function setEngineState(eng, state, statusText) {
+  const row = document.getElementById(`er-${CSS.escape(eng)}`);
+  if (!row) return;
+  row.className = `er ${state}`;
+  row.querySelector('.er-status').textContent = statusText;
+}
+
+function updateLPLabel(total) {
+  const rows   = document.querySelectorAll('#live-engine-rows .er');
+  const done   = document.querySelectorAll('#live-engine-rows .er.done, #live-engine-rows .er.error').length;
+  const total_ = rows.length;
+  const label  = document.getElementById('lp-label');
+  if (done < total_) {
+    label.textContent = `Searching ${total_ - done} of ${total_} engines…`;
+  } else {
+    label.textContent = 'All engines complete.';
+  }
+}
+
+function updateLiveTotals(total) {
+  if (total == null) return;
+  document.getElementById('lp-total').textContent =
+    `${total} link${total !== 1 ? 's' : ''} found`;
+}
+
+/* ── Finish / teardown ────────────────────────────────────────────────── */
+function finishSearch(total) {
+  setSearching(false, total);
+  stopProgress(true);
+
+  // Collapse live panel after a moment so results are the focus
+  setTimeout(() => {
+    hideLivePanel();
+    // Show controls row + stats pills
+    const ctrlRow = document.getElementById('controls-row');
+    if (allResults.length > 0) {
+      ctrlRow.classList.add('visible');
+      buildStatsPills();
+    } else {
+      const empty = document.getElementById('empty-state');
+      empty.style.display = '';
+      empty.querySelector('h2').textContent = 'No direct links found';
+      empty.querySelector('p').textContent  =
+        'Try broadening your query, adding more file types, or enabling more engines.';
+    }
+  }, 1800);
+}
+
+function buildStatsPills() {
+  const counts = {};
+  allResults.forEach(r => { counts[r.engine] = (counts[r.engine] || 0) + 1; });
+  document.getElementById('engine-stats').innerHTML = Object.entries(counts)
+    .map(([eng, n]) => `<span class="stat-pill">${escHtml(eng)}: <span>${n}</span></span>`)
+    .join('');
 }
 
 /* Allow Enter key in query box */
@@ -766,22 +1056,23 @@ document.getElementById('query-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') runSearch();
 });
 
-/* ── Progress animation ───────────────────────────────────────────────── */
-let progressInterval = null;
-function animateProgress() {
-  const bar = document.getElementById('progress-bar');
+/* ── Progress bar (real ticks now — one per engine completing) ─────────── */
+let _enginesTotal = 0;
+let _enginesDone  = 0;
+function startProgress(n) {
+  _enginesTotal = n;
+  _enginesDone  = 0;
+  const bar  = document.getElementById('progress-bar');
   const wrap = document.getElementById('progress-bar-wrap');
   wrap.classList.add('visible');
-  bar.style.width = '0%';
-  let pct = 0;
-  clearInterval(progressInterval);
-  progressInterval = setInterval(() => {
-    pct = Math.min(pct + Math.random() * 4, 88);
-    bar.style.width = pct + '%';
-  }, 300);
+  bar.style.width = '4%';
+}
+function tickProgress() {
+  _enginesDone++;
+  const pct = Math.round((_enginesDone / Math.max(_enginesTotal, 1)) * 100);
+  document.getElementById('progress-bar').style.width = pct + '%';
 }
 function stopProgress(success = false) {
-  clearInterval(progressInterval);
   const bar = document.getElementById('progress-bar');
   bar.style.width = success ? '100%' : '0%';
   setTimeout(() => {
@@ -792,11 +1083,11 @@ function stopProgress(success = false) {
 
 /* ── UI state helpers ─────────────────────────────────────────────────── */
 function setSearching(on, total = null) {
-  const btn = document.getElementById('search-btn');
-  const bar = document.getElementById('status-bar');
-  const spinner = document.getElementById('spinner');
+  const btn        = document.getElementById('search-btn');
+  const bar        = document.getElementById('status-bar');
+  const spinner    = document.getElementById('spinner');
   const statusText = document.getElementById('status-text');
-  const countEl = document.getElementById('result-count');
+  const countEl    = document.getElementById('result-count');
 
   btn.disabled = on;
   bar.classList.toggle('visible', on || total !== null);
@@ -821,46 +1112,56 @@ function clearError() {
   document.getElementById('error-banner').classList.remove('visible');
 }
 
-/* ── Render results ───────────────────────────────────────────────────── */
-function renderResults(results, engineStats) {
-  const body    = document.getElementById('results-body');
-  const wrap    = document.getElementById('table-wrap');
-  const empty   = document.getElementById('empty-state');
-  const ctrlRow = document.getElementById('controls-row');
-  const statsEl = document.getElementById('engine-stats');
+/* ── Incremental row append (called per engine as results arrive) ─────── */
+function appendRows(results) {
+  const body = document.getElementById('results-body');
+  const frag = document.createDocumentFragment();
+  results.forEach(r => {
+    const tr = document.createElement('tbody');
+    tr.innerHTML = resultRow(r);
+    const row = tr.firstElementChild;
+    row.querySelector('.copy-btn').addEventListener('click', copyHandler);
+    frag.appendChild(row);
+  });
+  body.appendChild(frag);
+}
 
-  // Engine stats pills
-  statsEl.innerHTML = Object.entries(engineStats)
-    .filter(([, n]) => n > 0)
-    .map(([eng, n]) => `<span class="stat-pill">${eng}: <span>${n}</span></span>`)
-    .join('');
+function showTableIfHidden() {
+  document.getElementById('table-wrap').style.display = '';
+}
 
-  if (results.length === 0) {
-    wrap.style.display = 'none';
-    empty.style.display = '';
-    ctrlRow.classList.remove('visible');
-    empty.querySelector('h2').textContent = 'No direct links found';
-    empty.querySelector('p').textContent =
-      'Try broadening your query, adding more file types, or enabling more search engines. Some engines may be rate-limited.';
-    return;
-  }
-
-  empty.style.display = 'none';
-  wrap.style.display  = '';
-  ctrlRow.classList.add('visible');
-
+/* ── Re-render all results (used by filter/sort) ──────────────────────── */
+function renderResults(results) {
+  const body = document.getElementById('results-body');
+  const wrap = document.getElementById('table-wrap');
+  if (results.length === 0) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
   const sorted = applySort([...results]);
-  body.innerHTML = sorted.map((r, i) => resultRow(r, i)).join('');
+  body.innerHTML = sorted.map(r => resultRow(r)).join('');
+  body.querySelectorAll('.copy-btn').forEach(btn => btn.addEventListener('click', copyHandler));
+}
 
-  // Bind copy buttons
-  body.querySelectorAll('.copy-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      navigator.clipboard.writeText(btn.dataset.url).then(() => {
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = 'Copy URL'; btn.classList.remove('copied'); }, 1800);
-      });
-    });
+/* ── Rate-limit toast ─────────────────────────────────────────────────── */
+function showRateLimitToast(engine) {
+  const wrap = document.getElementById('rl-toast-wrap');
+  const toast = document.createElement('div');
+  toast.className = 'rl-toast';
+  toast.innerHTML =
+    `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">` +
+    `<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>` +
+    `<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>` +
+    `<span><strong>${escHtml(engine)}</strong> is rate-limiting — results may be incomplete</span>`;
+  wrap.appendChild(toast);
+  // Auto-remove after animation finishes
+  setTimeout(() => toast.remove(), 5100);
+}
+
+function copyHandler() {
+  const url = this.dataset.url;
+  navigator.clipboard.writeText(url).then(() => {
+    this.textContent = 'Copied!';
+    this.classList.add('copied');
+    setTimeout(() => { this.textContent = 'Copy URL'; this.classList.remove('copied'); }, 1800);
   });
 }
 
@@ -897,26 +1198,12 @@ function escHtml(str) {
 /* ── Filter ───────────────────────────────────────────────────────────── */
 function filterResults() {
   const q = document.getElementById('filter-input').value.toLowerCase();
-  const filtered = allResults.filter(r =>
-    (r.filename + r.url + r.domain + r.engine + r.filetype + r.snippet)
-      .toLowerCase().includes(q)
-  );
-  renderFiltered(filtered);
-}
-
-function renderFiltered(results) {
-  const body = document.getElementById('results-body');
-  const sorted = applySort([...results]);
-  body.innerHTML = sorted.map((r, i) => resultRow(r, i)).join('');
-  body.querySelectorAll('.copy-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      navigator.clipboard.writeText(btn.dataset.url).then(() => {
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = 'Copy URL'; btn.classList.remove('copied'); }, 1800);
-      });
-    });
-  });
+  const filtered = q
+    ? allResults.filter(r =>
+        (r.filename + r.url + r.domain + r.engine + r.filetype + r.snippet)
+          .toLowerCase().includes(q))
+    : allResults;
+  renderResults(filtered);
 }
 
 /* ── Sort ─────────────────────────────────────────────────────────────── */
