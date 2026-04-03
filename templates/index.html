@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Engine File Search</title>
+  <style>
+    /* ── Reset & base ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --surface2:  #21262d;
+      --border:    #30363d;
+      --accent:    #238636;
+      --accent-h:  #2ea043;
+      --blue:      #1f6feb;
+      --blue-h:    #388bfd;
+      --red:       #da3633;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --radius:    8px;
+      --mono:      'Consolas', 'SF Mono', 'Fira Code', monospace;
+    }
+    html { font-size: 15px; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header svg { width: 32px; height: 32px; flex-shrink: 0; }
+    header h1 { font-size: 1.25rem; font-weight: 700; letter-spacing: -.3px; }
+    header p  { font-size: .8rem; color: var(--muted); }
+
+    /* ── Main layout ─────────────────────────────────────────────────────── */
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 0;
+      max-width: 1600px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────────── */
+    aside {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 1.5rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      overflow-y: auto;
+      height: calc(100vh - 73px);
+      position: sticky;
+      top: 73px;
+    }
+    .section-title {
+      font-size: .7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: .5rem;
+    }
+
+    /* Query input */
+    .search-box {
+      position: relative;
+    }
+    .search-box input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .6rem .9rem;
+      font-size: .9rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .search-box input:focus { border-color: var(--blue); }
+    .search-box input::placeholder { color: var(--muted); }
+
+    /* Number input */
+    .num-row {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+    }
+    .num-row label { font-size: .82rem; color: var(--muted); flex: 1; }
+    .num-row input {
+      width: 70px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .4rem .6rem;
+      font-size: .85rem;
+      text-align: center;
+      outline: none;
+    }
+    .num-row input:focus { border-color: var(--blue); }
+
+    /* Engine chips */
+    .engine-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+    }
+    .engine-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      padding: .3rem .65rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-size: .78rem;
+      cursor: pointer;
+      user-select: none;
+      transition: background .12s, border-color .12s;
+    }
+    .engine-chip:hover { background: var(--border); }
+    .engine-chip.active {
+      background: rgba(31,111,235,.25);
+      border-color: var(--blue);
+      color: var(--blue-h);
+    }
+    .engine-chip .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .engine-chip.active .dot { background: var(--blue-h); }
+    .engine-chip.requires-key { border-style: dashed; }
+
+    /* File-type accordion */
+    .ft-group { margin-bottom: .25rem; }
+    .ft-group-header {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      cursor: pointer;
+      padding: .3rem 0;
+      user-select: none;
+      font-size: .82rem;
+      color: var(--muted);
+    }
+    .ft-group-header:hover { color: var(--text); }
+    .ft-group-header .arrow {
+      font-size: .7rem;
+      transition: transform .15s;
+      margin-left: auto;
+    }
+    .ft-group-header.open .arrow { transform: rotate(90deg); }
+    .ft-chips {
+      display: none;
+      flex-wrap: wrap;
+      gap: .35rem;
+      padding: .4rem 0 .6rem .5rem;
+    }
+    .ft-chips.open { display: flex; }
+    .ft-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .3rem;
+      padding: .2rem .55rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-size: .75rem;
+      cursor: pointer;
+      user-select: none;
+      transition: background .12s, border-color .12s;
+      font-family: var(--mono);
+    }
+    .ft-chip:hover { background: var(--border); }
+    .ft-chip.active {
+      background: rgba(35,134,54,.25);
+      border-color: var(--accent);
+      color: #56d364;
+    }
+
+    /* Optional creds */
+    details.creds summary {
+      cursor: pointer;
+      font-size: .8rem;
+      color: var(--muted);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+    }
+    details.creds summary::-webkit-details-marker { display: none; }
+    details.creds summary::before { content: '▶'; font-size: .65rem; }
+    details.creds[open] summary::before { content: '▼'; }
+    details.creds .cred-fields {
+      display: flex;
+      flex-direction: column;
+      gap: .5rem;
+      margin-top: .75rem;
+    }
+    details.creds label { font-size: .75rem; color: var(--muted); display: block; margin-bottom: .2rem; }
+    details.creds input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .4rem .7rem;
+      font-size: .8rem;
+      font-family: var(--mono);
+      outline: none;
+    }
+    details.creds input:focus { border-color: var(--blue); }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
+      padding: .6rem 1.2rem;
+      border-radius: var(--radius);
+      font-size: .88rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: background .15s, opacity .15s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      width: 100%;
+    }
+    .btn-primary:hover { background: var(--accent-h); }
+    .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-sm {
+      padding: .35rem .75rem;
+      font-size: .78rem;
+      font-weight: 500;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+    }
+    .btn-sm:hover { background: var(--border); }
+
+    /* ── Results area ────────────────────────────────────────────────────── */
+    #results-area {
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    /* Status bar */
+    #status-bar {
+      display: none;
+      align-items: center;
+      gap: 1rem;
+      padding: .75rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: .85rem;
+    }
+    #status-bar.visible { display: flex; }
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--blue-h);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #status-text { flex: 1; color: var(--muted); }
+    #result-count { font-weight: 700; color: var(--blue-h); }
+
+    /* Filter / actions row */
+    #controls-row {
+      display: none;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+    }
+    #controls-row.visible { display: flex; }
+    #filter-input {
+      flex: 1;
+      min-width: 180px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .4rem .8rem;
+      font-size: .83rem;
+      outline: none;
+    }
+    #filter-input:focus { border-color: var(--blue); }
+    #filter-input::placeholder { color: var(--muted); }
+    #sort-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: .4rem .7rem;
+      font-size: .83rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* Engine stats pills */
+    #engine-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .35rem;
+    }
+    .stat-pill {
+      padding: .2rem .6rem;
+      border-radius: 20px;
+      font-size: .72rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .stat-pill span { font-weight: 700; color: var(--text); }
+
+    /* Table */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .83rem;
+    }
+    thead th {
+      background: var(--surface2);
+      padding: .6rem .9rem;
+      text-align: left;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+    thead th:hover { color: var(--text); }
+    thead th .sort-icon { margin-left: .25rem; opacity: .4; }
+    thead th.sorted .sort-icon { opacity: 1; color: var(--blue-h); }
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background .1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+    td { padding: .55rem .9rem; vertical-align: top; }
+    td.td-filename {
+      font-family: var(--mono);
+      font-size: .78rem;
+      max-width: 280px;
+    }
+    td.td-filename a {
+      color: var(--blue-h);
+      text-decoration: none;
+      word-break: break-all;
+    }
+    td.td-filename a:hover { text-decoration: underline; }
+    td.td-domain { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+    td.td-engine { white-space: nowrap; }
+    td.td-type .badge {
+      display: inline-block;
+      padding: .1rem .45rem;
+      border-radius: 4px;
+      font-size: .7rem;
+      font-weight: 700;
+      font-family: var(--mono);
+      background: rgba(31,111,235,.2);
+      color: var(--blue-h);
+      border: 1px solid rgba(31,111,235,.35);
+    }
+    td.td-snippet {
+      color: var(--muted);
+      font-size: .78rem;
+      max-width: 380px;
+      line-height: 1.45;
+    }
+    td.td-actions { white-space: nowrap; }
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      font-size: .72rem;
+      padding: .2rem .5rem;
+      cursor: pointer;
+      transition: color .12s, border-color .12s;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--muted); }
+    .copy-btn.copied { color: #56d364; border-color: #56d364; }
+
+    /* Empty / error states */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 4rem 2rem;
+      gap: 1rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .empty-state svg { width: 52px; height: 52px; opacity: .3; }
+    .empty-state h2 { font-size: 1rem; font-weight: 600; color: var(--text); }
+    .empty-state p  { font-size: .85rem; max-width: 340px; line-height: 1.6; }
+
+    .error-banner {
+      display: none;
+      align-items: center;
+      gap: .75rem;
+      padding: .75rem 1rem;
+      background: rgba(218,54,51,.15);
+      border: 1px solid rgba(218,54,51,.5);
+      border-radius: var(--radius);
+      font-size: .85rem;
+      color: #ff7b72;
+    }
+    .error-banner.visible { display: flex; }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      aside {
+        position: static;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+    }
+
+    /* Progress bar */
+    #progress-bar-wrap {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      display: none;
+    }
+    #progress-bar-wrap.visible { display: block; }
+    #progress-bar {
+      height: 100%;
+      background: var(--blue-h);
+      width: 0%;
+      transition: width .4s ease;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+    <circle cx="11" cy="11" r="8"/>
+    <path d="M21 21l-4.35-4.35"/>
+    <path d="M11 8v6M8 11h6" stroke-linecap="round"/>
+  </svg>
+  <div>
+    <h1>Multi-Engine File Search</h1>
+    <p>Aggressive parallel search across multiple engines · direct download links only</p>
+  </div>
+</header>
+
+<main>
+  <!-- ── Sidebar ─────────────────────────────────────────────────── -->
+  <aside>
+
+    <!-- Query -->
+    <div>
+      <div class="section-title">Search Query</div>
+      <div class="search-box">
+        <input id="query-input" type="text" placeholder='e.g.  "machine learning" course notes' />
+      </div>
+    </div>
+
+    <!-- Max results -->
+    <div>
+      <div class="section-title">Options</div>
+      <div class="num-row">
+        <label for="max-results">Max results per engine</label>
+        <input id="max-results" type="number" value="60" min="10" max="200" step="10" />
+      </div>
+    </div>
+
+    <!-- Engines -->
+    <div>
+      <div class="section-title">Search Engines</div>
+      <div class="engine-grid" id="engine-grid">
+        <div class="engine-chip active" data-engine="bing">
+          <span class="dot"></span>Bing
+        </div>
+        <div class="engine-chip active" data-engine="duckduckgo">
+          <span class="dot"></span>DuckDuckGo
+        </div>
+        <div class="engine-chip active" data-engine="yahoo">
+          <span class="dot"></span>Yahoo
+        </div>
+        <div class="engine-chip active" data-engine="startpage">
+          <span class="dot"></span>Startpage
+        </div>
+        <div class="engine-chip active" data-engine="mojeek">
+          <span class="dot"></span>Mojeek
+        </div>
+        <div class="engine-chip active" data-engine="commoncrawl">
+          <span class="dot"></span>Common Crawl
+        </div>
+        <div class="engine-chip active" data-engine="archive">
+          <span class="dot"></span>Internet Archive
+        </div>
+        <div class="engine-chip requires-key" data-engine="google" title="Requires Google CSE API key">
+          <span class="dot"></span>Google CSE ✦
+        </div>
+        <div class="engine-chip requires-key" data-engine="searxng" title="Requires SearXNG instance URL">
+          <span class="dot"></span>SearXNG ✦
+        </div>
+      </div>
+    </div>
+
+    <!-- File types -->
+    <div>
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+        File Types
+        <div style="display:flex;gap:.4rem;">
+          <button class="btn-sm" onclick="selectAllFt()">All</button>
+          <button class="btn-sm" onclick="clearAllFt()">None</button>
+        </div>
+      </div>
+      <div id="ft-container">
+        {% for group_name, exts in file_extensions.items() %}
+        <div class="ft-group">
+          <div class="ft-group-header" onclick="toggleGroup(this)">
+            {{ group_name }}
+            <span class="arrow">▶</span>
+          </div>
+          <div class="ft-chips">
+            {% for ext, label in exts.items() %}
+            <div class="ft-chip" data-ft="{{ ext }}">{{ ext }}</div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Optional credentials -->
+    <details class="creds">
+      <summary>Optional API credentials</summary>
+      <div class="cred-fields">
+        <div>
+          <label>Google CSE API Key</label>
+          <input id="google-api-key" type="password" placeholder="AIza..." autocomplete="off" />
+        </div>
+        <div>
+          <label>Google CSE CX (Search Engine ID)</label>
+          <input id="google-cx" type="text" placeholder="017576662512468239146:omuauf..." autocomplete="off" />
+        </div>
+        <div>
+          <label>SearXNG Instance URL</label>
+          <input id="searxng-url" type="text" placeholder="https://searx.example.com" />
+        </div>
+      </div>
+    </details>
+
+    <!-- Search button -->
+    <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+      </svg>
+      Search
+    </button>
+
+  </aside>
+
+  <!-- ── Results panel ───────────────────────────────────────────── -->
+  <section id="results-area">
+
+    <!-- Progress bar -->
+    <div id="progress-bar-wrap">
+      <div id="progress-bar"></div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+      <div class="spinner" id="spinner"></div>
+      <span id="status-text">Initialising search…</span>
+      <span id="result-count"></span>
+    </div>
+
+    <!-- Error banner -->
+    <div class="error-banner" id="error-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <span id="error-text"></span>
+    </div>
+
+    <!-- Controls row -->
+    <div id="controls-row">
+      <input id="filter-input" type="text" placeholder="Filter results…" oninput="filterResults()" />
+      <select id="sort-select" onchange="sortResults()">
+        <option value="engine">Sort by Engine</option>
+        <option value="type">Sort by Type</option>
+        <option value="domain">Sort by Domain</option>
+        <option value="filename">Sort by Filename</option>
+      </select>
+      <div id="engine-stats"></div>
+      <button class="btn-sm" onclick="exportCSV()">⬇ CSV</button>
+      <button class="btn-sm" onclick="exportURLs()">⬇ URLs</button>
+    </div>
+
+    <!-- Table -->
+    <div class="table-wrap" id="table-wrap" style="display:none;">
+      <table id="results-table">
+        <thead>
+          <tr>
+            <th onclick="sortBy('filename')" title="Sort by filename">#&nbsp; Filename <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('domain')" title="Sort by domain">Domain <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('filetype')" title="Sort by type">Type <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('engine')" title="Sort by engine">Engine <span class="sort-icon">↕</span></th>
+            <th>Snippet</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Empty state (shown before first search) -->
+    <div class="empty-state" id="empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+        <circle cx="11" cy="11" r="8"/>
+        <path d="M21 21l-4.35-4.35"/>
+        <path d="M8 11h6M11 8v6" stroke-linecap="round"/>
+      </svg>
+      <h2>No results yet</h2>
+      <p>Enter a search query, pick your file types and engines, then hit <strong>Search</strong>. Only direct download links are returned.</p>
+    </div>
+
+  </section>
+</main>
+
+<script>
+/* ── State ────────────────────────────────────────────────────────────── */
+let allResults = [];
+let sortKey = 'engine';
+let sortAsc  = true;
+let searchAbort = null;
+
+/* ── Engine chips ─────────────────────────────────────────────────────── */
+document.querySelectorAll('.engine-chip').forEach(chip => {
+  chip.addEventListener('click', () => chip.classList.toggle('active'));
+});
+
+/* ── File-type chips ──────────────────────────────────────────────────── */
+document.querySelectorAll('.ft-chip').forEach(chip => {
+  chip.addEventListener('click', () => chip.classList.toggle('active'));
+});
+
+function toggleGroup(header) {
+  header.classList.toggle('open');
+  header.nextElementSibling.classList.toggle('open');
+}
+
+function selectAllFt() {
+  document.querySelectorAll('.ft-chips').forEach(g => g.classList.add('open'));
+  document.querySelectorAll('.ft-group-header').forEach(h => h.classList.add('open'));
+  document.querySelectorAll('.ft-chip').forEach(c => c.classList.add('active'));
+}
+
+function clearAllFt() {
+  document.querySelectorAll('.ft-chip').forEach(c => c.classList.remove('active'));
+}
+
+/* ── Getters ──────────────────────────────────────────────────────────── */
+function getQuery()    { return document.getElementById('query-input').value.trim(); }
+function getEngines()  { return [...document.querySelectorAll('.engine-chip.active')].map(c => c.dataset.engine); }
+function getFileTypes(){ return [...document.querySelectorAll('.ft-chip.active')].map(c => c.dataset.ft); }
+function getMaxResults(){ return parseInt(document.getElementById('max-results').value) || 60; }
+
+/* ── Search ───────────────────────────────────────────────────────────── */
+async function runSearch() {
+  const query = getQuery();
+  const engines = getEngines();
+  const filetypes = getFileTypes();
+
+  if (!query)           { showError('Please enter a search query.'); return; }
+  if (!filetypes.length){ showError('Please select at least one file type.'); return; }
+  if (!engines.length)  { showError('Please select at least one search engine.'); return; }
+
+  clearError();
+  setSearching(true);
+
+  const payload = {
+    query,
+    filetypes,
+    engines,
+    max_results: getMaxResults(),
+    google_api_key: document.getElementById('google-api-key').value.trim(),
+    google_cx:      document.getElementById('google-cx').value.trim(),
+    searxng_url:    document.getElementById('searxng-url').value.trim(),
+  };
+
+  animateProgress();
+
+  try {
+    const res = await fetch('/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError(data.error || `HTTP ${res.status}`);
+      setSearching(false);
+      stopProgress();
+      return;
+    }
+
+    allResults = data.results || [];
+    renderResults(allResults, data.engine_stats || {});
+    setSearching(false, data.total);
+    stopProgress(true);
+
+  } catch (err) {
+    showError('Network error — is the server running? ' + err.message);
+    setSearching(false);
+    stopProgress();
+  }
+}
+
+/* Allow Enter key in query box */
+document.getElementById('query-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runSearch();
+});
+
+/* ── Progress animation ───────────────────────────────────────────────── */
+let progressInterval = null;
+function animateProgress() {
+  const bar = document.getElementById('progress-bar');
+  const wrap = document.getElementById('progress-bar-wrap');
+  wrap.classList.add('visible');
+  bar.style.width = '0%';
+  let pct = 0;
+  clearInterval(progressInterval);
+  progressInterval = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 4, 88);
+    bar.style.width = pct + '%';
+  }, 300);
+}
+function stopProgress(success = false) {
+  clearInterval(progressInterval);
+  const bar = document.getElementById('progress-bar');
+  bar.style.width = success ? '100%' : '0%';
+  setTimeout(() => {
+    document.getElementById('progress-bar-wrap').classList.remove('visible');
+    bar.style.width = '0%';
+  }, 600);
+}
+
+/* ── UI state helpers ─────────────────────────────────────────────────── */
+function setSearching(on, total = null) {
+  const btn = document.getElementById('search-btn');
+  const bar = document.getElementById('status-bar');
+  const spinner = document.getElementById('spinner');
+  const statusText = document.getElementById('status-text');
+  const countEl = document.getElementById('result-count');
+
+  btn.disabled = on;
+  bar.classList.toggle('visible', on || total !== null);
+
+  if (on) {
+    spinner.style.display = '';
+    statusText.textContent = 'Searching across all selected engines…';
+    countEl.textContent = '';
+  } else if (total !== null) {
+    spinner.style.display = 'none';
+    statusText.textContent = 'Search complete.';
+    countEl.textContent = `${total} direct link${total !== 1 ? 's' : ''} found`;
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-banner');
+  document.getElementById('error-text').textContent = msg;
+  el.classList.add('visible');
+}
+function clearError() {
+  document.getElementById('error-banner').classList.remove('visible');
+}
+
+/* ── Render results ───────────────────────────────────────────────────── */
+function renderResults(results, engineStats) {
+  const body    = document.getElementById('results-body');
+  const wrap    = document.getElementById('table-wrap');
+  const empty   = document.getElementById('empty-state');
+  const ctrlRow = document.getElementById('controls-row');
+  const statsEl = document.getElementById('engine-stats');
+
+  // Engine stats pills
+  statsEl.innerHTML = Object.entries(engineStats)
+    .filter(([, n]) => n > 0)
+    .map(([eng, n]) => `<span class="stat-pill">${eng}: <span>${n}</span></span>`)
+    .join('');
+
+  if (results.length === 0) {
+    wrap.style.display = 'none';
+    empty.style.display = '';
+    ctrlRow.classList.remove('visible');
+    empty.querySelector('h2').textContent = 'No direct links found';
+    empty.querySelector('p').textContent =
+      'Try broadening your query, adding more file types, or enabling more search engines. Some engines may be rate-limited.';
+    return;
+  }
+
+  empty.style.display = 'none';
+  wrap.style.display  = '';
+  ctrlRow.classList.add('visible');
+
+  const sorted = applySort([...results]);
+  body.innerHTML = sorted.map((r, i) => resultRow(r, i)).join('');
+
+  // Bind copy buttons
+  body.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.url).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'Copy URL'; btn.classList.remove('copied'); }, 1800);
+      });
+    });
+  });
+}
+
+function resultRow(r, i) {
+  const filename = escHtml(r.filename || r.url.split('/').pop());
+  const url      = escHtml(r.url);
+  const domain   = escHtml(r.domain || '');
+  const engine   = escHtml(r.engine || '');
+  const ft       = escHtml(r.filetype || '');
+  const snippet  = escHtml((r.snippet || '').substring(0, 200));
+  return `
+    <tr>
+      <td class="td-filename">
+        <a href="${url}" target="_blank" rel="noopener noreferrer" title="${url}">${filename}</a>
+      </td>
+      <td class="td-domain">${domain}</td>
+      <td class="td-type"><span class="badge">${ft}</span></td>
+      <td class="td-engine">${engine}</td>
+      <td class="td-snippet">${snippet}</td>
+      <td class="td-actions">
+        <button class="copy-btn" data-url="${url}">Copy URL</button>
+      </td>
+    </tr>`;
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* ── Filter ───────────────────────────────────────────────────────────── */
+function filterResults() {
+  const q = document.getElementById('filter-input').value.toLowerCase();
+  const filtered = allResults.filter(r =>
+    (r.filename + r.url + r.domain + r.engine + r.filetype + r.snippet)
+      .toLowerCase().includes(q)
+  );
+  renderFiltered(filtered);
+}
+
+function renderFiltered(results) {
+  const body = document.getElementById('results-body');
+  const sorted = applySort([...results]);
+  body.innerHTML = sorted.map((r, i) => resultRow(r, i)).join('');
+  body.querySelectorAll('.copy-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.url).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = 'Copy URL'; btn.classList.remove('copied'); }, 1800);
+      });
+    });
+  });
+}
+
+/* ── Sort ─────────────────────────────────────────────────────────────── */
+function applySort(arr) {
+  return arr.sort((a, b) => {
+    const av = (a[sortKey] || '').toLowerCase();
+    const bv = (b[sortKey] || '').toLowerCase();
+    if (av < bv) return sortAsc ? -1 : 1;
+    if (av > bv) return sortAsc ?  1 : -1;
+    return 0;
+  });
+}
+
+function sortBy(key) {
+  if (sortKey === key) {
+    sortAsc = !sortAsc;
+  } else {
+    sortKey = key;
+    sortAsc = true;
+  }
+  // Update header highlight
+  document.querySelectorAll('thead th').forEach(th => th.classList.remove('sorted'));
+  document.querySelectorAll('thead th').forEach(th => {
+    if (th.getAttribute('onclick') === `sortBy('${key}')`) th.classList.add('sorted');
+  });
+  filterResults();
+}
+
+function sortResults() {
+  sortKey = document.getElementById('sort-select').value;
+  sortAsc = true;
+  filterResults();
+}
+
+/* ── Export ───────────────────────────────────────────────────────────── */
+function getVisibleResults() {
+  const q = document.getElementById('filter-input').value.toLowerCase();
+  return q
+    ? allResults.filter(r =>
+        (r.filename + r.url + r.domain + r.engine + r.filetype + r.snippet).toLowerCase().includes(q))
+    : allResults;
+}
+
+function exportCSV() {
+  const rows = getVisibleResults();
+  const header = ['URL', 'Filename', 'Domain', 'Type', 'Engine', 'Snippet'];
+  const lines = [
+    header.join(','),
+    ...rows.map(r => [r.url, r.filename, r.domain, r.filetype, r.engine, (r.snippet || '').replace(/,/g, ' ')]
+      .map(v => `"${String(v).replace(/"/g, '""')}"`)
+      .join(','))
+  ];
+  download('file-search-results.csv', lines.join('\n'), 'text/csv');
+}
+
+function exportURLs() {
+  const rows = getVisibleResults();
+  const content = rows.map(r => r.url).join('\n');
+  download('file-search-urls.txt', content, 'text/plain');
+}
+
+function download(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: filename,
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>
