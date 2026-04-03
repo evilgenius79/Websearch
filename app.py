@@ -874,6 +874,38 @@ def index():
     return render_template("index.html", file_extensions=FILE_EXTENSIONS)
 
 
+_PROXY_SOURCES = {
+    "http":   "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+    "socks4": "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+    "socks5": "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+}
+
+
+@app.route("/fetch-proxies")
+def fetch_proxies():
+    """Fetch a fresh proxy list from TheSpeedX/SOCKS-List and return as JSON."""
+    kind = request.args.get("type", "http").lower()
+    if kind not in _PROXY_SOURCES:
+        return jsonify({"error": f"Unknown type '{kind}'. Use: http, socks4, socks5"}), 400
+
+    url = _PROXY_SOURCES[kind]
+    try:
+        r = requests.get(url, timeout=15, headers={"User-Agent": random.choice(USER_AGENTS)})
+        if r.status_code != 200:
+            return jsonify({"error": f"Upstream returned HTTP {r.status_code}"}), 502
+
+        scheme = "socks4://" if kind == "socks4" else ("socks5://" if kind == "socks5" else "http://")
+        proxies = []
+        for line in r.text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                proxies.append(f"{scheme}{line}" if "://" not in line else line)
+
+        return jsonify({"proxies": proxies, "count": len(proxies), "type": kind})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
 def _sse(payload: dict) -> str:
     """Format a dict as a single SSE data line."""
     return f"data: {json.dumps(payload)}\n\n"
