@@ -162,6 +162,27 @@
       color: var(--muted);
     }
     .ft-group-header:hover { color: var(--text); }
+    .ft-group-check {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px; height: 18px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      font-size: .7rem;
+      line-height: 1;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background .12s, border-color .12s;
+      color: transparent;
+    }
+    .ft-group-check:hover { border-color: var(--muted); }
+    .ft-group-check.checked {
+      background: rgba(35,134,54,.35);
+      border-color: var(--accent);
+      color: #56d364;
+    }
     .ft-group-header .arrow {
       font-size: .7rem;
       transition: transform .15s;
@@ -610,6 +631,78 @@
     .er.running  .er-status { color: var(--blue-h); }
     .er.done     .er-status { color: #56d364; }
     .er.error    .er-status { color: #ff7b72; }
+
+    /* ── Crawl progress bar inside live panel ────────────────────────────── */
+    #crawl-section {
+      display: none;
+      padding: .65rem 1rem;
+      border-top: 1px solid var(--border);
+      font-size: .82rem;
+    }
+    #crawl-section.visible { display: block; }
+    .crawl-header {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      margin-bottom: .5rem;
+    }
+    .crawl-header .lp-spinner {
+      width: 12px; height: 12px;
+      border: 2px solid var(--border);
+      border-top-color: #d29922;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      flex-shrink: 0;
+    }
+    .crawl-header .crawl-label { flex: 1; color: #d29922; }
+    .crawl-header .crawl-count { font-weight: 700; color: var(--blue-h); }
+    .crawl-bar-wrap {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .crawl-bar {
+      height: 100%;
+      background: #d29922;
+      width: 0%;
+      transition: width .3s ease;
+      border-radius: 2px;
+    }
+
+    /* Toggle switch */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      margin-top: .35rem;
+    }
+    .toggle-row label { font-size: .8rem; color: var(--muted); flex: 1; cursor: pointer; }
+    .toggle {
+      position: relative;
+      width: 34px; height: 18px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .slider {
+      position: absolute; inset: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    .toggle .slider::after {
+      content: '';
+      position: absolute;
+      width: 12px; height: 12px;
+      left: 2px; top: 2px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: transform .15s, background .15s;
+    }
+    .toggle input:checked + .slider { background: rgba(35,134,54,.35); border-color: var(--accent); }
+    .toggle input:checked + .slider::after { transform: translateX(16px); background: #56d364; }
   </style>
 </head>
 <body>
@@ -644,6 +737,17 @@
       <div class="num-row">
         <label for="max-results">Max results per engine</label>
         <input id="max-results" type="number" value="60" min="10" max="200" step="10" />
+      </div>
+      <div class="toggle-row">
+        <label for="deep-crawl">Deep crawl pages for download links</label>
+        <span class="toggle">
+          <input type="checkbox" id="deep-crawl" checked />
+          <span class="slider"></span>
+        </span>
+      </div>
+      <div class="num-row" id="max-crawl-row">
+        <label for="max-crawl">Max pages to crawl</label>
+        <input id="max-crawl" type="number" value="80" min="10" max="200" step="10" />
       </div>
     </div>
 
@@ -694,6 +798,7 @@
         {% for group_name, exts in file_extensions.items() %}
         <div class="ft-group">
           <div class="ft-group-header" onclick="toggleGroup(this)">
+            <span class="ft-group-check" onclick="event.stopPropagation(); toggleGroupCheck(this)" title="Select/deselect all in this category">☐</span>
             {{ group_name }}
             <span class="arrow">▶</span>
           </div>
@@ -759,6 +864,16 @@
         <span class="lp-total" id="lp-total"></span>
       </div>
       <div id="live-engine-rows"></div>
+      <div id="crawl-section">
+        <div class="crawl-header">
+          <div class="lp-spinner" id="crawl-spinner"></div>
+          <span class="crawl-label" id="crawl-label">Crawling pages for download links…</span>
+          <span class="crawl-count" id="crawl-count"></span>
+        </div>
+        <div class="crawl-bar-wrap">
+          <div class="crawl-bar" id="crawl-bar"></div>
+        </div>
+      </div>
     </div>
 
     <!-- Error banner -->
@@ -831,7 +946,9 @@ document.querySelectorAll('.engine-chip').forEach(chip => {
 
 /* ── File-type chips ──────────────────────────────────────────────────── */
 document.querySelectorAll('.ft-chip').forEach(chip => {
-  chip.addEventListener('click', () => chip.classList.toggle('active'));
+  chip.addEventListener('click', () => {
+    chip.classList.toggle('active');
+  });
 });
 
 function toggleGroup(header) {
@@ -839,14 +956,46 @@ function toggleGroup(header) {
   header.nextElementSibling.classList.toggle('open');
 }
 
+function toggleGroupCheck(checkEl) {
+  const group = checkEl.closest('.ft-group');
+  const chips = group.querySelectorAll('.ft-chip');
+  const allActive = [...chips].every(c => c.classList.contains('active'));
+  chips.forEach(c => c.classList.toggle('active', !allActive));
+  checkEl.classList.toggle('checked', !allActive);
+  checkEl.textContent = !allActive ? '✓' : '☐';
+  // Auto-open the group so you can see what was selected
+  const header = group.querySelector('.ft-group-header');
+  const chipsContainer = group.querySelector('.ft-chips');
+  if (!allActive) {
+    header.classList.add('open');
+    chipsContainer.classList.add('open');
+  }
+}
+
+/* Keep group checkmarks in sync when individual chips are clicked */
+document.querySelectorAll('.ft-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    setTimeout(() => {
+      const group = chip.closest('.ft-group');
+      const chips = group.querySelectorAll('.ft-chip');
+      const checkEl = group.querySelector('.ft-group-check');
+      const allActive = [...chips].every(c => c.classList.contains('active'));
+      checkEl.classList.toggle('checked', allActive);
+      checkEl.textContent = allActive ? '✓' : '☐';
+    }, 0);
+  });
+});
+
 function selectAllFt() {
   document.querySelectorAll('.ft-chips').forEach(g => g.classList.add('open'));
   document.querySelectorAll('.ft-group-header').forEach(h => h.classList.add('open'));
   document.querySelectorAll('.ft-chip').forEach(c => c.classList.add('active'));
+  document.querySelectorAll('.ft-group-check').forEach(c => { c.classList.add('checked'); c.textContent = '✓'; });
 }
 
 function clearAllFt() {
   document.querySelectorAll('.ft-chip').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.ft-group-check').forEach(c => { c.classList.remove('checked'); c.textContent = '☐'; });
 }
 
 /* ── Getters ──────────────────────────────────────────────────────────── */
@@ -874,6 +1023,8 @@ async function runSearch() {
   const payload = {
     query, filetypes, engines,
     max_results:    getMaxResults(),
+    deep_crawl:     document.getElementById('deep-crawl').checked,
+    max_crawl:      parseInt(document.getElementById('max-crawl').value) || 80,
     google_api_key: document.getElementById('google-api-key').value.trim(),
     google_cx:      document.getElementById('google-cx').value.trim(),
     searxng_url:    document.getElementById('searxng-url').value.trim(),
@@ -938,11 +1089,9 @@ function handleSSE(ev) {
       break;
 
     case 'engine_done': {
-      const label = ev.count === 0
-        ? 'No results'
-        : `${ev.count} result${ev.count !== 1 ? 's' : ''}`;
+      let label = ev.count === 0 ? 'No direct' : `${ev.count} direct`;
+      if (ev.pages > 0) label += `, ${ev.pages} pages`;
       setEngineState(ev.engine, 'done', label);
-      // Append new results to the table immediately
       if (ev.results && ev.results.length) {
         allResults.push(...ev.results);
         appendRows(ev.results);
@@ -961,6 +1110,25 @@ function handleSSE(ev) {
       tickProgress();
       break;
 
+    /* ── Phase 2: deep crawl events ───────────────── */
+    case 'crawl_start':
+      showCrawlSection(ev.page_count);
+      break;
+
+    case 'crawl_progress':
+      updateCrawlProgress(ev.crawled, ev.of, ev.total);
+      if (ev.results && ev.results.length) {
+        allResults.push(...ev.results);
+        appendRows(ev.results);
+        showTableIfHidden();
+      }
+      updateLiveTotals(ev.total);
+      break;
+
+    case 'crawl_done':
+      finishCrawl(ev.crawled, ev.total);
+      break;
+
     case 'done':
       finishSearch(ev.total);
       break;
@@ -973,6 +1141,7 @@ function resetLivePanel() {
   document.getElementById('lp-total').textContent = '';
   document.getElementById('lp-label').textContent = 'Starting search…';
   document.getElementById('live-panel').classList.add('visible');
+  document.getElementById('crawl-section').classList.remove('visible');
   // Reset results table
   document.getElementById('results-body').innerHTML = '';
   document.getElementById('table-wrap').style.display = 'none';
@@ -1018,6 +1187,35 @@ function updateLiveTotals(total) {
   if (total == null) return;
   document.getElementById('lp-total').textContent =
     `${total} link${total !== 1 ? 's' : ''} found`;
+}
+
+/* ── Crawl progress helpers ───────────────────────────────────────────── */
+function showCrawlSection(pageCount) {
+  const section = document.getElementById('crawl-section');
+  section.classList.add('visible');
+  document.getElementById('crawl-label').textContent =
+    `Crawling ${pageCount} pages for download links…`;
+  document.getElementById('crawl-bar').style.width = '0%';
+  document.getElementById('crawl-count').textContent = '';
+  document.getElementById('crawl-spinner').style.display = '';
+}
+
+function updateCrawlProgress(crawled, of, total) {
+  const pct = Math.round((crawled / Math.max(of, 1)) * 100);
+  document.getElementById('crawl-bar').style.width = pct + '%';
+  document.getElementById('crawl-label').textContent =
+    `Crawling pages… ${crawled}/${of}`;
+  document.getElementById('crawl-count').textContent =
+    `${total} total links`;
+}
+
+function finishCrawl(crawled, total) {
+  document.getElementById('crawl-bar').style.width = '100%';
+  document.getElementById('crawl-spinner').style.display = 'none';
+  document.getElementById('crawl-label').textContent =
+    `Crawl complete — visited ${crawled} pages`;
+  document.getElementById('crawl-count').textContent =
+    `${total} total links`;
 }
 
 /* ── Finish / teardown ────────────────────────────────────────────────── */

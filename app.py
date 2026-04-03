@@ -9,7 +9,7 @@ import json
 import random
 import re
 import time
-from urllib.parse import urlencode, urlparse, unquote
+from urllib.parse import urlencode, urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
@@ -186,8 +186,110 @@ def make_result(url: str, title: str, snippet: str, engine: str, filetype: str) 
     }
 
 
+def make_page_hit(url: str, title: str, snippet: str, engine: str, filetype: str) -> dict:
+    """A search-result page that *mentions* the filetype but isn't a direct link."""
+    return {
+        "page_url": url,
+        "title": title,
+        "snippet": snippet,
+        "engine": engine,
+        "filetype": filetype,
+    }
+
+
 def jitter(lo: float = 0.4, hi: float = 1.2) -> None:
     time.sleep(random.uniform(lo, hi))
+
+
+# ---------------------------------------------------------------------------
+# Page crawler – visits search-result pages to find actual file links
+# ---------------------------------------------------------------------------
+
+# Skip domains that are search engines themselves or unlikely to host files
+_SKIP_DOMAINS = {
+    "google.com", "bing.com", "duckduckgo.com", "yahoo.com",
+    "youtube.com", "facebook.com", "twitter.com", "x.com",
+    "reddit.com", "instagram.com", "linkedin.com", "tiktok.com",
+    "amazon.com", "ebay.com", "wikipedia.org",
+}
+
+
+def _should_skip_domain(domain: str) -> bool:
+    domain = domain.lower().lstrip("www.")
+    return any(domain == s or domain.endswith("." + s) for s in _SKIP_DOMAINS)
+
+
+def crawl_page_for_links(
+    page_url: str,
+    filetypes: list[str],
+    page_title: str = "",
+    page_snippet: str = "",
+    engine: str = "",
+) -> list[dict]:
+    """Visit a single page and extract all <a href> links that end with a target extension."""
+    results = []
+    try:
+        parsed = urlparse(page_url)
+        if _should_skip_domain(parsed.netloc):
+            return results
+
+        r = requests.get(
+            page_url,
+            headers=get_headers(referer=f"{parsed.scheme}://{parsed.netloc}"),
+            timeout=10,
+            allow_redirects=True,
+            stream=True,
+        )
+
+        # Check content-type — only parse HTML
+        ct = r.headers.get("Content-Type", "").lower()
+        if "html" not in ct and "xhtml" not in ct:
+            # The page itself might be a direct download
+            if is_direct_link(r.url, filetypes):
+                ext = r.url.rsplit(".", 1)[-1].lower().split("?")[0]
+                results.append(make_result(r.url, page_title, page_snippet, engine, ext))
+            return results
+
+        # Limit how much HTML we parse (first 500KB)
+        body = r.text[:512_000]
+        soup = BeautifulSoup(body, "html.parser")
+        seen = set()
+
+        base_url = page_url
+        base_tag = soup.find("base")
+        if base_tag and base_tag.get("href"):
+            base_url = urljoin(page_url, base_tag["href"])
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+
+            full_url = urljoin(base_url, href)
+
+            # Strip fragments
+            full_url = full_url.split("#")[0]
+
+            if full_url in seen:
+                continue
+
+            if is_direct_link(full_url, filetypes):
+                seen.add(full_url)
+                ext = full_url.rsplit(".", 1)[-1].lower().split("?")[0]
+                link_text = a.get_text(strip=True)[:120] or ""
+                results.append(
+                    make_result(
+                        full_url,
+                        link_text or page_title,
+                        f"Found on {parsed.netloc}",
+                        engine + " (crawled)",
+                        ext,
+                    )
+                )
+    except Exception:
+        pass
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -195,15 +297,15 @@ def jitter(lo: float = 0.4, hi: float = 1.2) -> None:
 # ---------------------------------------------------------------------------
 
 
-def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> list[dict]:
-    results, seen = [], set()
+def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+    results, pages, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
-        pages = min(5, (per_type + 9) // 10)
+        page_count = min(5, (per_type + 9) // 10)
 
-        for page in range(pages):
+        for page in range(page_count):
             try:
                 params = {"q": dork, "first": page * 10 + 1, "count": 10}
                 r = requests.get(
@@ -228,22 +330,20 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> list
                         continue
                     if href in seen:
                         continue
-                    if not is_direct_link(href, [ft]):
-                        # Sometimes Bing caches the real URL in data-href
-                        href = a.get("data-href", href)
-                        if not is_direct_link(href, [ft]):
-                            continue
                     seen.add(href)
+                    title = a.get_text(strip=True)
                     snippet_el = tag.select_one(".b_caption p") or tag.select_one("p")
-                    results.append(
-                        make_result(
-                            href,
-                            a.get_text(strip=True),
-                            snippet_el.get_text(strip=True) if snippet_el else "",
-                            "Bing",
-                            ft,
-                        )
-                    )
+                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                    if is_direct_link(href, [ft]):
+                        results.append(make_result(href, title, snippet, "Bing", ft))
+                    else:
+                        # Also try data-href
+                        alt = a.get("data-href", "")
+                        if alt and is_direct_link(alt, [ft]):
+                            results.append(make_result(alt, title, snippet, "Bing", ft))
+                        else:
+                            pages.append(make_page_hit(href, title, snippet, "Bing", ft))
                     found += 1
 
                 if found == 0:
@@ -252,29 +352,23 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60) -> list
             except Exception:
                 break
 
-    return results
+    return results, pages
 
 
-def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -> list[dict]:
-    results, seen = [], set()
+def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+    results, pages, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
         try:
             session = requests.Session()
-            # Get vqd token first (required by DDG)
             r0 = session.get(
                 "https://duckduckgo.com/",
                 params={"q": dork},
                 headers=get_headers("https://duckduckgo.com"),
                 timeout=12,
             )
-            vqd = ""
-            m = re.search(r'vqd=([\d-]+)', r0.text)
-            if m:
-                vqd = m.group(1)
 
-            # HTML lite version is more scrapable
             r = session.get(
                 "https://html.duckduckgo.com/html/",
                 data={"q": dork, "b": "", "kl": "us-en"},
@@ -292,7 +386,6 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
                 if not a:
                     continue
                 href = a.get("href", "")
-                # DDG wraps links with a redirect – extract the real URL
                 if "uddg=" in href:
                     m2 = re.search(r'uddg=([^&]+)', href)
                     if m2:
@@ -301,35 +394,31 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60) -
                     continue
                 if href in seen:
                     continue
-                if not is_direct_link(href, [ft]):
-                    continue
                 seen.add(href)
+                title = a.get_text(strip=True)
                 snippet_el = result.select_one(".result__snippet")
-                results.append(
-                    make_result(
-                        href,
-                        a.get_text(strip=True),
-                        snippet_el.get_text(strip=True) if snippet_el else "",
-                        "DuckDuckGo",
-                        ft,
-                    )
-                )
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                if is_direct_link(href, [ft]):
+                    results.append(make_result(href, title, snippet, "DuckDuckGo", ft))
+                else:
+                    pages.append(make_page_hit(href, title, snippet, "DuckDuckGo", ft))
             jitter(1.0, 2.5)
         except Exception:
             continue
 
-    return results
+    return results, pages
 
 
-def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> list[dict]:
-    results, seen = [], set()
+def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
+    results, page_hits, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
-        pages = min(4, (per_type + 9) // 10)
+        page_count = min(4, (per_type + 9) // 10)
 
-        for page in range(pages):
+        for page in range(page_count):
             try:
                 params = {"p": dork, "b": page * 10 + 1, "pz": 10}
                 r = requests.get(
@@ -350,7 +439,6 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> lis
                     if not a:
                         continue
                     href = a.get("href", "")
-                    # Yahoo wraps URLs
                     if "/RU=" in href:
                         m = re.search(r"/RU=([^/]+)/", href)
                         if m:
@@ -359,19 +447,15 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> lis
                         continue
                     if href in seen:
                         continue
-                    if not is_direct_link(href, [ft]):
-                        continue
                     seen.add(href)
+                    title = a.get_text(strip=True)
                     snippet_el = tag.select_one(".compText") or tag.select_one("p")
-                    results.append(
-                        make_result(
-                            href,
-                            a.get_text(strip=True),
-                            snippet_el.get_text(strip=True) if snippet_el else "",
-                            "Yahoo",
-                            ft,
-                        )
-                    )
+                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                    if is_direct_link(href, [ft]):
+                        results.append(make_result(href, title, snippet, "Yahoo", ft))
+                    else:
+                        page_hits.append(make_page_hit(href, title, snippet, "Yahoo", ft))
                     found += 1
 
                 if found == 0:
@@ -380,14 +464,14 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60) -> lis
             except Exception:
                 break
 
-    return results
+    return results, page_hits
 
 
 def search_google_cse(
     query: str, filetypes: list[str], api_key: str, cx: str, max_results: int = 100
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Google Custom Search Engine API (requires free API key + CX)."""
-    results, seen = [], set()
+    results, page_hits, seen = [], [], set()
 
     for ft in filetypes:
         start = 1
@@ -416,26 +500,23 @@ def search_google_cse(
                     url = item.get("link", "")
                     if url and url not in seen:
                         seen.add(url)
-                        results.append(
-                            make_result(
-                                url,
-                                item.get("title", ""),
-                                item.get("snippet", ""),
-                                "Google CSE",
-                                ft,
-                            )
-                        )
+                        title = item.get("title", "")
+                        snippet = item.get("snippet", "")
+                        if is_direct_link(url, [ft]):
+                            results.append(make_result(url, title, snippet, "Google CSE", ft))
+                        else:
+                            page_hits.append(make_page_hit(url, title, snippet, "Google CSE", ft))
                 start += 10
                 jitter(0.2, 0.5)
             except Exception:
                 break
 
-    return results
+    return results, page_hits
 
 
-def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100) -> list[dict]:
+def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100) -> tuple[list[dict], list[dict]]:
     """Query the Common Crawl URL Index API for publicly crawled files."""
-    results, seen = [], set()
+    results, seen = [], set()  # CC returns direct URLs only — no pages to crawl
 
     try:
         idx_r = requests.get("https://index.commoncrawl.org/collinfo.json", timeout=10)
@@ -484,10 +565,10 @@ def search_commoncrawl(query: str, filetypes: list[str], max_results: int = 100)
             except Exception:
                 continue
 
-    return results
+    return results, []  # CC only returns direct URLs
 
 
-def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) -> list[dict]:
+def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) -> tuple[list[dict], list[dict]]:
     """Search the Internet Archive for publicly available files."""
     results, seen = [], set()
 
@@ -551,14 +632,14 @@ def search_archive_org(query: str, filetypes: list[str], max_results: int = 60) 
         except Exception:
             continue
 
-    return results
+    return results, []  # Archive returns direct URLs
 
 
 def search_searxng(
     query: str, filetypes: list[str], instance_url: str, max_results: int = 60
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Search via a self-hosted or public SearXNG instance (JSON API)."""
-    results, seen = [], set()
+    results, page_hits, seen = [], [], set()
     instance_url = instance_url.rstrip("/")
 
     for ft in filetypes:
@@ -582,27 +663,24 @@ def search_searxng(
 
             for item in r.json().get("results", []):
                 url = item.get("url", "")
-                if url and url not in seen and is_direct_link(url, [ft]):
+                if url and url not in seen:
                     seen.add(url)
-                    results.append(
-                        make_result(
-                            url,
-                            item.get("title", ""),
-                            item.get("content", ""),
-                            f"SearXNG",
-                            ft,
-                        )
-                    )
+                    title = item.get("title", "")
+                    content = item.get("content", "")
+                    if is_direct_link(url, [ft]):
+                        results.append(make_result(url, title, content, "SearXNG", ft))
+                    else:
+                        page_hits.append(make_page_hit(url, title, content, "SearXNG", ft))
             jitter(1.0, 2.0)
         except Exception:
             continue
 
-    return results
+    return results, page_hits
 
 
-def search_startpage(query: str, filetypes: list[str], max_results: int = 40) -> list[dict]:
+def search_startpage(query: str, filetypes: list[str], max_results: int = 40) -> tuple[list[dict], list[dict]]:
     """Search Startpage (Google proxy) for files."""
-    results, seen = [], set()
+    results, page_hits, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
@@ -627,29 +705,25 @@ def search_startpage(query: str, filetypes: list[str], max_results: int = 40) ->
                     continue
                 if href in seen:
                     continue
-                if not is_direct_link(href, [ft]):
-                    continue
                 seen.add(href)
+                title = a.get_text(strip=True)
                 snippet_el = tag.select_one(".result-description, .w-gl__description")
-                results.append(
-                    make_result(
-                        href,
-                        a.get_text(strip=True),
-                        snippet_el.get_text(strip=True) if snippet_el else "",
-                        "Startpage",
-                        ft,
-                    )
-                )
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                if is_direct_link(href, [ft]):
+                    results.append(make_result(href, title, snippet, "Startpage", ft))
+                else:
+                    page_hits.append(make_page_hit(href, title, snippet, "Startpage", ft))
             jitter(1.5, 3.0)
         except Exception:
             continue
 
-    return results
+    return results, page_hits
 
 
-def search_mojeek(query: str, filetypes: list[str], max_results: int = 40) -> list[dict]:
+def search_mojeek(query: str, filetypes: list[str], max_results: int = 40) -> tuple[list[dict], list[dict]]:
     """Search Mojeek (independent index)."""
-    results, seen = [], set()
+    results, page_hits, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
@@ -674,25 +748,21 @@ def search_mojeek(query: str, filetypes: list[str], max_results: int = 40) -> li
                     continue
                 if href in seen:
                     continue
-                if not is_direct_link(href, [ft]):
-                    continue
                 seen.add(href)
                 title_el = tag.select_one(".title")
                 desc_el = tag.select_one(".s")
-                results.append(
-                    make_result(
-                        href,
-                        title_el.get_text(strip=True) if title_el else "",
-                        desc_el.get_text(strip=True) if desc_el else "",
-                        "Mojeek",
-                        ft,
-                    )
-                )
+                title = title_el.get_text(strip=True) if title_el else ""
+                desc = desc_el.get_text(strip=True) if desc_el else ""
+
+                if is_direct_link(href, [ft]):
+                    results.append(make_result(href, title, desc, "Mojeek", ft))
+                else:
+                    page_hits.append(make_page_hit(href, title, desc, "Mojeek", ft))
             jitter(0.8, 1.5)
         except Exception:
             continue
 
-    return results
+    return results, page_hits
 
 
 # ---------------------------------------------------------------------------
@@ -765,48 +835,135 @@ def search():
 
     active = {k: v for k, v in TASKS.items() if k in engines}
 
+    deep_crawl = data.get("deep_crawl", True)
+    max_crawl = min(int(data.get("max_crawl", 80)), 200)
+
     @stream_with_context
     def generate():
         seen_urls: set[str] = set()
         total = 0
+        all_pages: list[dict] = []  # pages to crawl in phase 2
 
-        # Tell the client which engines are about to start
+        # ── Phase 1: search engines ──────────────────────────────────────
         yield _sse({"type": "engines_registered", "engines": list(active.keys())})
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active) or 1) as pool:
             future_to_engine = {pool.submit(fn): eng for eng, fn in active.items()}
 
-            # Signal each engine as "running" the moment its future is submitted
             for eng in active:
                 yield _sse({"type": "engine_start", "engine": eng})
 
             for future in concurrent.futures.as_completed(future_to_engine, timeout=90):
                 eng = future_to_engine[future]
                 try:
-                    res = future.result(timeout=5)
+                    direct_results, page_hits = future.result(timeout=5)
                     new_results = []
-                    for r in res:
+                    for r in direct_results:
                         url = r["url"]
                         if url not in seen_urls:
                             seen_urls.add(url)
                             new_results.append(r)
                             total += 1
+
+                    # Collect pages to crawl in phase 2
+                    page_count = 0
+                    for p in page_hits:
+                        if p["page_url"] not in seen_urls:
+                            all_pages.append(p)
+                            page_count += 1
+
+                    status_label = f"{len(new_results)} direct"
+                    if page_count:
+                        status_label += f", {page_count} pages to crawl"
+
                     yield _sse({
                         "type":    "engine_done",
                         "engine":  eng,
                         "count":   len(new_results),
+                        "pages":   page_count,
                         "results": new_results,
                         "total":   total,
                     })
                 except Exception as exc:
-                    err_str = str(exc)
                     yield _sse({
                         "type":        "engine_error",
                         "engine":      eng,
-                        "error":       err_str,
+                        "error":       str(exc),
                         "rate_limited": _looks_rate_limited(exc),
                         "total":       total,
                     })
+
+        # ── Phase 2: crawl result pages for actual file links ────────────
+        if deep_crawl and all_pages:
+            # Deduplicate + limit pages to crawl
+            crawl_seen = set()
+            crawl_queue = []
+            for p in all_pages:
+                u = p["page_url"]
+                if u not in crawl_seen:
+                    crawl_seen.add(u)
+                    crawl_queue.append(p)
+                if len(crawl_queue) >= max_crawl:
+                    break
+
+            yield _sse({
+                "type":       "crawl_start",
+                "page_count": len(crawl_queue),
+            })
+
+            crawled = 0
+            batch_results: list[dict] = []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as cpool:
+                future_to_page = {
+                    cpool.submit(
+                        crawl_page_for_links,
+                        p["page_url"],
+                        filetypes,
+                        p.get("title", ""),
+                        p.get("snippet", ""),
+                        p.get("engine", ""),
+                    ): p
+                    for p in crawl_queue
+                }
+
+                for future in concurrent.futures.as_completed(future_to_page, timeout=90):
+                    crawled += 1
+                    try:
+                        links = future.result(timeout=12)
+                        new_links = []
+                        for r in links:
+                            url = r["url"]
+                            if url not in seen_urls:
+                                seen_urls.add(url)
+                                new_links.append(r)
+                                total += 1
+                                batch_results.append(r)
+                    except Exception:
+                        new_links = []
+
+                    # Send progress updates every page (or in small batches)
+                    if batch_results and (crawled % 3 == 0 or crawled == len(crawl_queue)):
+                        yield _sse({
+                            "type":     "crawl_progress",
+                            "crawled":  crawled,
+                            "of":       len(crawl_queue),
+                            "results":  batch_results,
+                            "total":    total,
+                        })
+                        batch_results = []
+
+            # Flush any remaining results
+            if batch_results:
+                yield _sse({
+                    "type":     "crawl_progress",
+                    "crawled":  crawled,
+                    "of":       len(crawl_queue),
+                    "results":  batch_results,
+                    "total":    total,
+                })
+
+            yield _sse({"type": "crawl_done", "crawled": crawled, "total": total})
 
         yield _sse({"type": "done", "total": total})
 
