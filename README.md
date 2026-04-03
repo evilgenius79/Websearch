@@ -1,40 +1,45 @@
 # Multi-Engine File Search
 
-> Aggressive parallel file hunting across multiple search engines — direct download links only.
+> Aggressive two-phase file hunting — search engines + deep page crawling — direct download links only.
 
-A self-hosted web application that fires filetype dork queries at multiple search engines simultaneously and surfaces only direct download links. Built with a Python/Flask backend and a modern dark-themed frontend.
+A self-hosted web application that fires filetype dork queries at multiple search engines simultaneously, then crawls every result page for actual download links. Built with a Python/Flask streaming backend and a modern dark-themed frontend.
 
 ---
 
 ## Screenshot
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  🔍 Multi-Engine File Search                                            │
-│  Aggressive parallel search across multiple engines · direct links only │
-├──────────────────┬──────────────────────────────────────────────────────┤
-│  Search Query    │  # Filename      Domain    Type   Engine   Actions   │
-│  ─────────────   │  ──────────────────────────────────────────────────  │
-│  Engines         │  report.pdf      gov.uk    PDF    Bing     Copy URL  │
-│  □ Bing          │  dataset.csv     data.io   CSV    DDG      Copy URL  │
-│  □ DuckDuckGo    │  manual.epub     archive   EPUB   Archive  Copy URL  │
-│  □ Yahoo  ...    │  tune.hpt        forums..  HPT    Yahoo    Copy URL  │
-│                  │                                                       │
-│  File Types      │  [ Filter results… ]  [Sort ▾]  [⬇ CSV] [⬇ URLs]   │
-│  > Documents     │                                                       │
-│  > ECU Tunes     │                                                       │
-│  > Archives ...  │                                                       │
-│                  │                                                       │
-│  [  Search  ]    │                                                       │
-└──────────────────┴──────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  🔍 Multi-Engine File Search                                                    │
+│  Aggressive parallel search · deep page crawl · direct download links only     │
+├──────────────────────┬──────────────────────────────────────────────────────────┤
+│  Search Query        │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  Progress      │
+│  ─────────────────   │                                                           │
+│  Options             │  Searching 3 of 7 engines…        47 links found         │
+│  Max results:  60    │  ┌────────────────────────────────────────────────────┐  │
+│  Max crawl:    80    │  │ ⠋ Bing           12 direct, 8 pages                │  │
+│  [⊙] Deep crawl      │  │ ✓ DuckDuckGo     0 direct, 14 pages                │  │
+│                      │  │ ✓ Yahoo          3 direct, 6 pages                 │  │
+│  Engines             │  │ ⠋ Common Crawl   Searching…                        │  │
+│  ● Bing  ● DDG ...   │  │ Crawling pages… 34/80          [████████░░░░░░░░]  │  │
+│                      │  └────────────────────────────────────────────────────┘  │
+│  File Types          │                                                           │
+│  [✓] Documents  ▶    │  # Filename        Domain    Type  Engine       Actions  │
+│  [✓] ECU Tunes  ▶    │  tune.hpt          forum..   HPT   Bing(crawled) Copy   │
+│  [ ] Archives   ▶    │  map.bin           site.com  BIN   DDG(crawled)  Copy   │
+│                      │  report.pdf        gov.uk    PDF   Archive       Copy   │
+│  [  Search  ]        │  [ Filter… ] [Sort ▾] [⬇ CSV] [⬇ URLs]                  │
+└──────────────────────┴──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-### Multi-Engine Parallel Search
-All selected engines run concurrently in separate threads. Results stream back as each engine completes — no waiting for the slowest engine before seeing results.
+### Two-Phase Search
+
+#### Phase 1 — Multi-Engine Parallel Search
+All selected engines run concurrently in separate threads. Results stream back as each engine completes via Server-Sent Events — no waiting for the slowest engine before seeing results.
 
 | Engine | Type | Notes |
 |---|---|---|
@@ -48,13 +53,48 @@ All selected engines run concurrently in separate threads. Results stream back a
 | **Google CSE** | Official API | Requires a free Google Custom Search API key + CX ID |
 | **SearXNG** | Meta-search API | Point at any public or self-hosted SearXNG instance |
 
-### Filetype Dork Queries
-Every search is constructed as `filetype:<ext> <your query>` — the standard operator recognised by Google, Bing, Yahoo, and DuckDuckGo to restrict results to a specific file extension. Direct-link filtering then verifies the URL path actually ends in the extension before including it in results.
+#### Phase 2 — Deep Page Crawling
+This is the key feature that makes the tool actually find files. Search engines almost never index direct download URLs — the real files live behind landing pages, forum posts, and download portals.
 
-### Direct-Link Filtering
-Results that don't end in the requested file extension are silently discarded. Every link in the results table is a URL you can paste directly into a browser or download manager and get the file.
+After Phase 1, the backend visits every result page in parallel (up to 80 pages, 12 threads) and scrapes all `<a href>` links looking for URLs that end in your selected extensions. This catches:
+
+- Files linked from forum threads and download pages
+- CDN / mirror links embedded in HTML
+- File index pages and FTP-style directories
+- Download buttons hidden behind a landing page
+
+Results from crawled pages appear in the table incrementally as pages are visited, tagged with the source engine + `(crawled)`.
+
+**Smart filtering:**
+- Only HTML pages are parsed (first 500 KB to keep things fast)
+- Non-HTML responses that are themselves a direct file are captured
+- Social media, search engines, and other non-file-hosting domains are automatically skipped
+
+### Live Status Panel
+A real-time status grid appears the moment you hit Search, showing every active engine and the crawl progress:
+
+| State | Icon | Meaning |
+|---|---|---|
+| Queued | dim dot | Waiting to start |
+| Searching | blue spinner | Engine query in progress |
+| Done | green ✓ | `N direct, M pages` |
+| Rate limited | red ✗ | Engine blocked the request |
+| Error | red ✗ | Connection or parse failure |
+
+A separate crawl progress bar shows pages visited during Phase 2. The panel collapses automatically when everything finishes.
+
+### Rate-Limit Detection
+When Bing, DDG, Yahoo, or other scraped engines return a `429`, `403`, CAPTCHA page, or known block phrase:
+- The engine row updates to **"Rate limited"** in red
+- An orange **toast notification** pops up in the bottom-right corner (auto-dismisses after 5 s)
+- Any results collected before the block are still kept
+
+### Filetype Dork Queries
+Every search is constructed as `filetype:<ext> <your query>` — the standard operator recognised by Bing, Yahoo, DuckDuckGo, and Google to bias results toward pages mentioning that file type.
 
 ### 60+ File Type Categories
+
+Each category has a **Select All checkbox** in its header — click once to activate or deactivate every type in the group. Individual chips stay in sync.
 
 | Category | Formats |
 |---|---|
@@ -127,33 +167,45 @@ The server binds to `0.0.0.0:5000` by default — accessible from any device on 
 
 ### Basic Search
 1. Type your search terms in the **Search Query** box
-2. Select one or more **File Types** from the accordion categories
+2. Select **File Types** — use the per-category checkbox or pick individual chips
 3. Ensure at least one **Search Engine** chip is highlighted
 4. Click **Search** (or press `Enter`)
 
-Results appear in the table as the backend finishes querying each engine. A progress bar and live status indicator show what's happening.
+Phase 1 (engine queries) and Phase 2 (page crawling) run automatically. The live status panel shows real-time progress for both phases. Results appear in the table as they are found.
+
+### Options
+
+| Control | Default | Description |
+|---|---|---|
+| Max results per engine | 60 | How many results to request from each engine (10–200) |
+| Deep crawl | On | Visit result pages to find actual download links |
+| Max pages to crawl | 80 | Caps how many pages Phase 2 will visit (10–200) |
+
+Turning off **Deep crawl** skips Phase 2 entirely — useful if you only want to check whether direct-indexed links exist, or if you need faster results.
 
 ### Refining Results
-- **Filter box** — type any text to instantly filter results across filename, URL, domain, engine, type, and snippet fields
-- **Sort dropdown / column headers** — click any column header (Filename, Domain, Type, Engine) to sort ascending/descending; also available via the dropdown
-- **Max results slider** — control how deep each engine searches (10–200 per engine)
+- **Filter box** — type any text to instantly filter across filename, URL, domain, engine, type, and snippet
+- **Sort** — click any column header (Filename, Domain, Type, Engine) to sort ascending/descending; also available via the dropdown
+- **Engine stats pills** — shown after search completes, showing how many links came from each source
 
 ### Exporting
 | Button | Output |
 |---|---|
 | **⬇ CSV** | Comma-separated file with URL, filename, domain, type, engine, snippet |
-| **⬇ URLs** | Plain text file — one URL per line, ready for `wget -i` or a download manager |
+| **⬇ URLs** | Plain text — one URL per line, ready for `wget -i` or a download manager |
+
+Export respects the active filter — only visible rows are exported.
 
 ### Optional API Credentials
 Expand the **Optional API credentials** panel in the sidebar to unlock additional engines:
 
 | Field | Purpose |
 |---|---|
-| Google CSE API Key | Enables the Google Custom Search engine. Get a free key at [console.developers.google.com](https://console.developers.google.com) |
+| Google CSE API Key | Enables Google CSE. Get a free key at [console.developers.google.com](https://console.developers.google.com) |
 | Google CSE CX | Your Custom Search Engine ID (create one at [cse.google.com](https://cse.google.com)) |
 | SearXNG Instance URL | URL of any public or self-hosted SearXNG instance (e.g. `https://searx.be`) |
 
-Credentials are never stored — they only exist in your browser session.
+Credentials are never stored — they only exist for the duration of your browser session.
 
 ---
 
@@ -165,9 +217,13 @@ All tunable constants are at the top of `app.py`:
 |---|---|---|
 | `USER_AGENTS` | 7 entries | Rotated randomly on every request to reduce fingerprinting |
 | `FILE_EXTENSIONS` | 60+ formats | Add new extensions by inserting into the relevant dict group |
-| `max_results` cap | 200 | Hard ceiling enforced server-side regardless of client input |
-| Worker threads | `len(active engines)` | One thread per active engine; scales automatically |
-| Per-engine timeout | 60 s total / 30 s per future | Controlled via `ThreadPoolExecutor` and `as_completed` |
+| `_SKIP_DOMAINS` | 15 entries | Domains skipped during page crawl (social media, search engines) |
+| `max_results` cap | 200 | Hard server-side ceiling on engine results |
+| `max_crawl` cap | 200 | Hard server-side ceiling on pages to crawl |
+| Search threads | `len(active engines)` | One thread per active engine |
+| Crawl threads | 12 | Fixed pool for Phase 2 page fetching |
+| Per-engine timeout | 90 s | `as_completed` timeout for search phase |
+| Per-page timeout | 10 s | Individual page fetch timeout during crawl |
 
 ### Adding a New File Type
 
@@ -185,13 +241,16 @@ The frontend picks it up automatically — no template changes needed.
 
 ### Adding a New Search Engine
 
-1. Write a function following the existing pattern:
+1. Write a function returning `(direct_results, pages_to_crawl)`:
 ```python
-def search_myengine(query: str, filetypes: list[str], max_results: int) -> list[dict]:
-    results, seen = [], set()
+def search_myengine(query: str, filetypes: list[str], max_results: int) -> tuple[list[dict], list[dict]]:
+    results, page_hits, seen = [], [], set()
     # ... scrape / call API ...
-    results.append(make_result(url, title, snippet, "My Engine", ft))
-    return results
+    if is_direct_link(url, [ft]):
+        results.append(make_result(url, title, snippet, "My Engine", ft))
+    else:
+        page_hits.append(make_page_hit(url, title, snippet, "My Engine", ft))
+    return results, page_hits
 ```
 
 2. Register it in the `TASKS` dict inside the `/search` route:
@@ -214,31 +273,52 @@ if "myengine" in engines:
 ```
 Browser  ──POST /search──►  Flask app
                                │
-                    ┌──────────┴──────────┐
-                    │  ThreadPoolExecutor  │
-                    │                      │
-              ┌─────┴────┐          ┌──────┴────┐
-              │  Bing     │  ...     │  Archive  │
-              │  scraper  │          │  API      │
-              └─────┬────┘          └──────┬────┘
-                    │                      │
-                    └──────────┬───────────┘
+                    ┌──────────┴──────────────────────────────────┐
+                    │           Phase 1: Search Engines            │
+                    │         ThreadPoolExecutor (N engines)        │
+                    │                                               │
+              ┌─────┴────┐   ┌────────────┐   ┌───────────────┐   │
+              │  Bing     │   │ DuckDuckGo │   │ Common Crawl  │   │
+              │  scraper  │   │  scraper   │   │  Index API    │   │
+              └─────┬────┘   └─────┬──────┘   └───────┬───────┘   │
+                    └──────────────┴──────────────────┘            │
+                               │                                   │
+                  ┌────────────┴──────────────┐                    │
+                  │  direct links             │  page URLs         │
+                  │  → stream to browser      │  → crawl queue     │
+                  └───────────────────────────┘                    │
+                                                                   │
+                    ┌──────────┴──────────────────────────────────┐
+                    │           Phase 2: Page Crawler              │
+                    │         ThreadPoolExecutor (12 workers)       │
+                    │                                               │
+              ┌─────┴──────┐  ┌──────────────┐  ┌──────────────┐  │
+              │ forum page │  │ download page│  │ index page   │  │
+              │ → scrape   │  │  → scrape    │  │  → scrape    │  │
+              └─────┬──────┘  └──────┬───────┘  └──────┬───────┘  │
+                    └────────────────┴─────────────────┘            │
+                               │                                   │
+                  direct file links extracted from <a href>        │
+                  → deduplicate → stream to browser                │
+                    └──────────────────────────────────────────────┘
                                │
-                      deduplicate by URL
-                      filter: is_direct_link()
-                               │
-                    ◄──JSON response──────────
+                    ◄── SSE stream (engine_done, crawl_progress, done) ──
 ```
 
-Each engine function:
-1. Builds a `filetype:<ext> <query>` dork for every selected extension
-2. Makes HTTP requests with a randomly-chosen user agent
-3. Parses the response HTML (or JSON for APIs)
-4. Unwraps any redirect URLs (DDG `uddg=`, Yahoo `/RU=/`, etc.)
-5. Passes each candidate URL through `is_direct_link()` — checks the URL path ends with the extension
-6. Returns a list of result dicts
+### SSE Event Flow
 
-The main route merges all results, deduplicates on URL, and returns JSON to the browser.
+The `/search` route streams [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) so the browser receives results in real time without polling:
+
+| Event | When fired | Payload |
+|---|---|---|
+| `engines_registered` | Before search starts | List of active engine names |
+| `engine_start` | Thread submitted | Engine name |
+| `engine_done` | Engine thread finished | Direct results + page URLs + counts |
+| `engine_error` | Engine threw exception | Error message, `rate_limited` flag |
+| `crawl_start` | Phase 2 begins | Total pages to crawl |
+| `crawl_progress` | Every 3 pages crawled | New links found, progress counts |
+| `crawl_done` | All pages visited | Final crawl count |
+| `done` | Everything complete | Grand total |
 
 ---
 
@@ -246,20 +326,22 @@ The main route merges all results, deduplicates on URL, and returns JSON to the 
 
 | Package | Purpose |
 |---|---|
-| `flask` | Web framework and template rendering |
-| `requests` | HTTP client for all engine queries |
-| `beautifulsoup4` | HTML parsing for scraped engines |
+| `flask` | Web framework, template rendering, streaming responses |
+| `requests` | HTTP client for engine queries and page crawling |
+| `beautifulsoup4` | HTML parsing for scraped engines and crawled pages |
 | `lxml` | Fast HTML/XML parser backend for BeautifulSoup |
 
 ---
 
 ## Notes & Limitations
 
-- **Rate limiting** — Search engines may temporarily block repeated queries. Adding delays (`jitter()`) is already built in; reduce `max_results` or disable engines if you hit blocks.
-- **Scraper fragility** — HTML-scraped engines (Bing, DDG, Yahoo, etc.) may break if those sites change their markup. The API-based engines (Common Crawl, Internet Archive, Google CSE) are more stable.
-- **Google CSE scope** — Google's free Custom Search API returns a maximum of 100 results (10 pages × 10). Results depend on how you configure your CSE — set it to "Search the entire web" for broadest coverage.
-- **Common Crawl freshness** — The CC index lags behind live web by weeks to months. Good for finding historically published files; not for fresh content.
-- **Internet Archive** — Only returns items that have been explicitly archived/uploaded; not a general web index.
+- **Rate limiting** — Search engines may temporarily block repeated queries. Random delays (`jitter()`) are built in. Reduce `max_results`, disable individual engines, or wait a few minutes if you hit blocks.
+- **Scraper fragility** — HTML-scraped engines (Bing, DDG, Yahoo, etc.) may break if those sites change their page markup. API-based engines (Common Crawl, Internet Archive, Google CSE) are more stable.
+- **Crawl depth** — Phase 2 only follows links on the direct result pages. It does not recursively crawl (no second-level pages). If a file is two clicks deep from a search result it won't be found.
+- **JavaScript-rendered pages** — The crawler uses plain `requests` + BeautifulSoup and does not execute JavaScript. Pages that load their download links via JS won't be crawled successfully.
+- **Google CSE scope** — Google's free Custom Search API returns a maximum of 100 results (10 pages × 10). Set your CSE to "Search the entire web" for broadest coverage.
+- **Common Crawl freshness** — The CC index lags behind the live web by weeks to months. Good for finding historically published files; not for fresh content.
+- **Internet Archive** — Only returns items explicitly archived or uploaded to archive.org; not a general web index.
 
 ---
 
