@@ -989,8 +989,15 @@ def search():
             for eng in active:
                 yield _sse({"type": "engine_start", "engine": eng})
 
-            for future in concurrent.futures.as_completed(future_to_engine, timeout=90):
-                eng = future_to_engine[future]
+            def _proxy_info():
+                return (
+                    {"proxies_active": proxy_manager.active,
+                     "proxies_burned": proxy_manager.burned_count}
+                    if proxy_manager else {}
+                )
+
+            def _emit_engine_result(future, eng):
+                nonlocal total
                 try:
                     direct_results, page_hits = future.result(timeout=5)
                     new_results = []
@@ -1001,45 +1008,47 @@ def search():
                             new_results.append(r)
                             total += 1
 
-                    # Collect pages to crawl in phase 2
                     page_count = 0
                     for p in page_hits:
                         if p["page_url"] not in seen_urls:
                             all_pages.append(p)
                             page_count += 1
 
-                    status_label = f"{len(new_results)} direct"
-                    if page_count:
-                        status_label += f", {page_count} pages to crawl"
-
-                    proxy_info = (
-                        {"proxies_active": proxy_manager.active,
-                         "proxies_burned": proxy_manager.burned_count}
-                        if proxy_manager else {}
-                    )
-                    yield _sse({
+                    return _sse({
                         "type":    "engine_done",
                         "engine":  eng,
                         "count":   len(new_results),
                         "pages":   page_count,
                         "results": new_results,
                         "total":   total,
-                        **proxy_info,
+                        **_proxy_info(),
                     })
                 except Exception as exc:
-                    proxy_info = (
-                        {"proxies_active": proxy_manager.active,
-                         "proxies_burned": proxy_manager.burned_count}
-                        if proxy_manager else {}
-                    )
-                    yield _sse({
+                    return _sse({
                         "type":        "engine_error",
                         "engine":      eng,
                         "error":       str(exc),
                         "rate_limited": _looks_rate_limited(exc),
                         "total":       total,
-                        **proxy_info,
+                        **_proxy_info(),
                     })
+
+            try:
+                for future in concurrent.futures.as_completed(future_to_engine, timeout=120):
+                    yield _emit_engine_result(future, future_to_engine[future])
+            except TimeoutError:
+                # Some engines didn't finish in time — report them and move on
+                for future, eng in future_to_engine.items():
+                    if not future.done():
+                        future.cancel()
+                        yield _sse({
+                            "type":        "engine_error",
+                            "engine":      eng,
+                            "error":       "Timed out — engine took too long to respond",
+                            "rate_limited": False,
+                            "total":       total,
+                            **_proxy_info(),
+                        })
 
         # ── Phase 2: crawl result pages for actual file links ────────────
         if deep_crawl and all_pages:
@@ -1076,23 +1085,36 @@ def search():
                     for p in crawl_queue
                 }
 
-                for future in concurrent.futures.as_completed(future_to_page, timeout=90):
-                    crawled += 1
+                def _process_crawl_future(future):
+                    nonlocal total
                     try:
                         links = future.result(timeout=12)
-                        new_links = []
                         for r in links:
                             url = r["url"]
                             if url not in seen_urls:
                                 seen_urls.add(url)
-                                new_links.append(r)
-                                total += 1
                                 batch_results.append(r)
+                                total += 1
                     except Exception:
-                        new_links = []
+                        pass
 
-                    # Send progress updates every page (or in small batches)
-                    if batch_results and (crawled % 3 == 0 or crawled == len(crawl_queue)):
+                try:
+                    for future in concurrent.futures.as_completed(future_to_page, timeout=120):
+                        crawled += 1
+                        _process_crawl_future(future)
+                        if batch_results and (crawled % 3 == 0 or crawled == len(crawl_queue)):
+                            yield _sse({
+                                "type":     "crawl_progress",
+                                "crawled":  crawled,
+                                "of":       len(crawl_queue),
+                                "results":  batch_results,
+                                "total":    total,
+                            })
+                            batch_results = []
+                except TimeoutError:
+                    # Flush whatever we have and move on
+                    crawled = len(crawl_queue)  # mark as done
+                    if batch_results:
                         yield _sse({
                             "type":     "crawl_progress",
                             "crawled":  crawled,
@@ -1127,4 +1149,8 @@ def search():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    import sys
+    # Disable the Werkzeug reloader on Windows — it causes WinError 10038
+    # (socket operation on non-socket) when reloading during a live SSE stream.
+    use_reloader = sys.platform != "win32"
+    app.run(debug=True, host="0.0.0.0", port=5000, use_reloader=use_reloader)
