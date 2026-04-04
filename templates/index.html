@@ -797,7 +797,7 @@
         <div class="engine-chip active" data-engine="bing">
           <span class="dot"></span>Bing
         </div>
-        <div class="engine-chip active" data-engine="duckduckgo">
+        <div class="engine-chip" data-engine="duckduckgo" title="filetype: operator removed Apr 2023 — uses open-directory dorks instead, lower yield">
           <span class="dot"></span>DuckDuckGo
         </div>
         <div class="engine-chip active" data-engine="yahoo">
@@ -1185,6 +1185,15 @@ async function runSearch() {
   if (!query)            { showError('Please enter a search query.'); return; }
   if (!filetypes.length) { showError('Please select at least one file type.'); return; }
   if (!engines.length)   { showError('Please select at least one search engine.'); return; }
+  if (engines.includes('filepursuit') && !document.getElementById('filepursuit-key').value.trim()) {
+    showError('FilePursuit is selected but no RapidAPI key was entered. Add your key under "Optional API credentials" or deselect FilePursuit.'); return;
+  }
+  if (engines.includes('google') && (!document.getElementById('google-api-key').value.trim() || !document.getElementById('google-cx').value.trim())) {
+    showError('Google CSE is selected but API key or CX is missing. Add both under "Optional API credentials" or deselect Google CSE.'); return;
+  }
+  if (engines.includes('searxng') && !document.getElementById('searxng-url').value.trim()) {
+    showError('SearXNG is selected but no instance URL was entered. Add it under "Optional API credentials" or deselect SearXNG.'); return;
+  }
 
   clearError();
   allResults = [];

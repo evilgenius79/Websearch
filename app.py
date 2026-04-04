@@ -1167,6 +1167,22 @@ def _looks_rate_limited(exc: Exception) -> bool:
     return False
 
 
+def _with_rl_retry(fn, proxy_manager: "ProxyManager | None", retries: int = 1, delay: float = 8.0):
+    """Call fn(); if RateLimitedError is raised, rotate proxy (if any) and retry
+    up to `retries` times after sleeping `delay` seconds.  On final failure the
+    exception is re-raised so the caller can report it normally."""
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except RateLimitedError:
+            if attempt == retries:
+                raise
+            if proxy_manager:
+                proxy_manager.rotate()  # try a different proxy next time
+            time.sleep(delay + random.uniform(0, 3))
+    raise RateLimitedError("exhausted retries")
+
+
 @app.route("/search", methods=["POST"])
 def search():
     data = request.get_json(force=True)
@@ -1196,12 +1212,16 @@ def search():
     pm = proxy_manager  # short alias for lambda capture
     pq: queue.SimpleQueue = queue.SimpleQueue()  # live progress events from engine threads
 
+    def _task(fn):
+        """Wrap a search lambda with rate-limit retry."""
+        return lambda: _with_rl_retry(fn, pm)
+
     TASKS = {
-        "bing":        lambda: search_bing(query, filetypes, max_results, pm, pq),
-        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results, pm, pq),
-        "yahoo":       lambda: search_yahoo(query, filetypes, max_results, pm, pq),
-        "startpage":   lambda: search_startpage(query, filetypes, max_results, pm, pq),
-        "mojeek":      lambda: search_mojeek(query, filetypes, max_results, pm, pq),
+        "bing":        _task(lambda: search_bing(query, filetypes, max_results, pm, pq)),
+        "duckduckgo":  _task(lambda: search_duckduckgo(query, filetypes, max_results, pm, pq)),
+        "yahoo":       _task(lambda: search_yahoo(query, filetypes, max_results, pm, pq)),
+        "startpage":   _task(lambda: search_startpage(query, filetypes, max_results, pm, pq)),
+        "mojeek":      _task(lambda: search_mojeek(query, filetypes, max_results, pm, pq)),
         "commoncrawl": lambda: search_commoncrawl(query, filetypes, max_results),
         "archive":     lambda: search_archive_org(query, filetypes, max_results),
     }
@@ -1262,6 +1282,7 @@ def search():
                     page_count = 0
                     for p in page_hits:
                         if p["page_url"] not in seen_urls:
+                            seen_urls.add(p["page_url"])
                             all_pages.append(p)
                             page_count += 1
 
