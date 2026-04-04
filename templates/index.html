@@ -588,9 +588,11 @@
     }
 
     .er {
-      display: flex;
-      align-items: center;
-      gap: .6rem;
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: .6rem;
+      row-gap: .1rem;
       padding: .5rem .9rem;
       border-right: 1px solid var(--border);
       border-bottom: 1px solid var(--border);
@@ -637,17 +639,19 @@
       font-weight: 700;
     }
 
+    .er-icon { grid-row: 1; grid-column: 1; align-self: center; }
     .er-name {
+      grid-row: 1; grid-column: 2;
       font-weight: 600;
       color: var(--text);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      flex: 1;
     }
     .er.pending .er-name { color: var(--muted); }
 
     .er-status {
+      grid-row: 1; grid-column: 3;
       font-size: .72rem;
       white-space: nowrap;
     }
@@ -655,6 +659,17 @@
     .er.running  .er-status { color: var(--blue-h); }
     .er.done     .er-status { color: #56d364; }
     .er.error    .er-status { color: #ff7b72; }
+
+    .er-detail {
+      grid-row: 2; grid-column: 2 / 4;
+      font-size: .68rem;
+      color: var(--muted);
+      font-family: var(--mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-height: .9rem;
+    }
 
     /* ── Crawl progress bar inside live panel ────────────────────────────── */
     #crawl-section {
@@ -988,6 +1003,19 @@ let allResults = [];
 let sortKey = 'engine';
 let sortAsc  = true;
 let searchAbort = null;
+const _engineStart = {};  // engine name → start timestamp (ms)
+
+/* Elapsed time ticker — updates running engine status every second */
+setInterval(() => {
+  const now = Date.now();
+  document.querySelectorAll('.er.running').forEach(row => {
+    const eng = row.querySelector('.er-name')?.textContent;
+    if (!eng || !_engineStart[eng]) return;
+    const secs = Math.round((now - _engineStart[eng]) / 1000);
+    const statusEl = row.querySelector('.er-status');
+    if (statusEl) statusEl.textContent = `${secs}s`;
+  });
+}, 1000);
 
 /* ── Deep crawl toggle → show/hide max-crawl row ─────────────────────── */
 const deepCrawlCb  = document.getElementById('deep-crawl');
@@ -1227,14 +1255,28 @@ function handleSSE(ev) {
       break;
 
     case 'engine_start':
-      setEngineState(ev.engine, 'running', 'Searching…');
+      setEngineState(ev.engine, 'running', '0s');
+      _engineStart[ev.engine] = ev.ts ? ev.ts * 1000 : Date.now();
       updateLPLabel();
       break;
+
+    case 'engine_progress': {
+      const detail = document.getElementById(`er-detail-${CSS.escape(ev.engine)}`);
+      if (detail) {
+        let d = `${ev.filetype.toUpperCase()}`;
+        if (ev.pages > 1) d += `  ·  pg ${ev.page}/${ev.pages}`;
+        if (ev.proxy)     d += `  ·  ${ev.proxy}`;
+        detail.textContent = d;
+      }
+      break;
+    }
 
     case 'engine_done': {
       let label = ev.count === 0 ? 'No direct' : `${ev.count} direct`;
       if (ev.pages > 0) label += `, ${ev.pages} pages`;
       setEngineState(ev.engine, 'done', label);
+      const dDone = document.getElementById(`er-detail-${CSS.escape(ev.engine)}`);
+      if (dDone) dDone.textContent = '';
       if (ev.results && ev.results.length) {
         allResults.push(...ev.results);
         appendRows(ev.results);
@@ -1247,13 +1289,16 @@ function handleSSE(ev) {
       break;
     }
 
-    case 'engine_error':
+    case 'engine_error': {
       setEngineState(ev.engine, 'error', ev.rate_limited ? 'Rate limited' : 'Error');
+      const dErr = document.getElementById(`er-detail-${CSS.escape(ev.engine)}`);
+      if (dErr) dErr.textContent = '';
       if (ev.rate_limited) showRateLimitToast(ev.engine);
       updateLiveTotals(ev.total);
       updateProxyStatus(ev.proxies_active, ev.proxies_burned);
       tickProgress();
       break;
+    }
 
     /* ── Phase 2: deep crawl events ───────────────── */
     case 'crawl_start':
@@ -1306,6 +1351,7 @@ function buildLiveRows(engines) {
       <span class="er-icon"></span>
       <span class="er-name">${escHtml(eng)}</span>
       <span class="er-status">Queued</span>
+      <span class="er-detail" id="er-detail-${CSS.escape(eng)}"></span>
     </div>`).join('');
 }
 

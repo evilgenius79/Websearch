@@ -6,6 +6,7 @@ using filetype dork queries.
 
 import concurrent.futures
 import json
+import queue
 import random
 import re
 import threading
@@ -70,6 +71,11 @@ class ProxyManager:
     def has_proxies(self) -> bool:
         with self._lock:
             return bool(self._pool)
+
+    def peek(self) -> str | None:
+        """Return the current proxy URL without rotating (for display only)."""
+        with self._lock:
+            return self._pool[0] if self._pool else None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -243,6 +249,20 @@ def make_page_hit(url: str, title: str, snippet: str, engine: str, filetype: str
     }
 
 
+def _proxy_display(proxy_manager: "ProxyManager | None") -> str | None:
+    """Return a short display string for the current proxy (host:port only)."""
+    if not proxy_manager:
+        return None
+    raw = proxy_manager.peek()
+    if not raw:
+        return None
+    try:
+        p = urlparse(raw)
+        return f"{p.hostname}:{p.port}"
+    except Exception:
+        return raw
+
+
 def jitter(lo: float = 0.4, hi: float = 1.2) -> None:
     time.sleep(random.uniform(lo, hi))
 
@@ -379,7 +399,7 @@ def crawl_page_for_links(
 # ---------------------------------------------------------------------------
 
 
-def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
+def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
     results, pages, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
@@ -389,6 +409,10 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_m
 
         for page in range(page_count):
             try:
+                if progress_q:
+                    progress_q.put_nowait({"type": "engine_progress", "engine": "Bing",
+                        "filetype": ft, "page": page + 1, "pages": page_count,
+                        "proxy": _proxy_display(proxy_manager)})
                 params = {"q": dork, "first": page * 10 + 1, "count": 10}
                 r = _req(
                     "GET",
@@ -441,12 +465,16 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_m
     return results, pages
 
 
-def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
+def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
     results, pages, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
         try:
+            if progress_q:
+                progress_q.put_nowait({"type": "engine_progress", "engine": "DuckDuckGo",
+                    "filetype": ft, "page": 1, "pages": 1,
+                    "proxy": _proxy_display(proxy_manager)})
             # POST to the HTML lite endpoint (GET ignores the data= body)
             r = _req(
                 "POST",
@@ -494,7 +522,7 @@ def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, p
     return results, pages
 
 
-def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
+def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
     results, page_hits, seen = [], [], set()
     per_type = max(10, max_results // max(len(filetypes), 1))
 
@@ -504,6 +532,10 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_
 
         for page in range(page_count):
             try:
+                if progress_q:
+                    progress_q.put_nowait({"type": "engine_progress", "engine": "Yahoo",
+                        "filetype": ft, "page": page + 1, "pages": page_count,
+                        "proxy": _proxy_display(proxy_manager)})
                 params = {"p": dork, "b": page * 10 + 1, "pz": 10}
                 r = _req(
                     "GET",
@@ -801,13 +833,17 @@ def search_searxng(
     return results, page_hits
 
 
-def search_startpage(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
+def search_startpage(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
     """Search Startpage (Google proxy) for files."""
     results, page_hits, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
         try:
+            if progress_q:
+                progress_q.put_nowait({"type": "engine_progress", "engine": "Startpage",
+                    "filetype": ft, "page": 1, "pages": 1,
+                    "proxy": _proxy_display(proxy_manager)})
             params = {"q": dork, "language": "english", "cat": "web"}
             r = _req(
                 "GET",
@@ -847,13 +883,17 @@ def search_startpage(query: str, filetypes: list[str], max_results: int = 40, pr
     return results, page_hits
 
 
-def search_mojeek(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None) -> tuple[list[dict], list[dict]]:
+def search_mojeek(query: str, filetypes: list[str], max_results: int = 40, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
     """Search Mojeek (independent index)."""
     results, page_hits, seen = [], [], set()
 
     for ft in filetypes:
         dork = f'filetype:{ft} {query}'
         try:
+            if progress_q:
+                progress_q.put_nowait({"type": "engine_progress", "engine": "Mojeek",
+                    "filetype": ft, "page": 1, "pages": 1,
+                    "proxy": _proxy_display(proxy_manager)})
             params = {"q": dork, "fmt": "10"}
             r = _req(
                 "GET",
@@ -990,12 +1030,14 @@ def search():
         return jsonify({"error": "Select at least one search engine"}), 400
 
     pm = proxy_manager  # short alias for lambda capture
+    pq: queue.SimpleQueue = queue.SimpleQueue()  # live progress events from engine threads
+
     TASKS = {
-        "bing":        lambda: search_bing(query, filetypes, max_results, pm),
-        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results, pm),
-        "yahoo":       lambda: search_yahoo(query, filetypes, max_results, pm),
-        "startpage":   lambda: search_startpage(query, filetypes, max_results, pm),
-        "mojeek":      lambda: search_mojeek(query, filetypes, max_results, pm),
+        "bing":        lambda: search_bing(query, filetypes, max_results, pm, pq),
+        "duckduckgo":  lambda: search_duckduckgo(query, filetypes, max_results, pm, pq),
+        "yahoo":       lambda: search_yahoo(query, filetypes, max_results, pm, pq),
+        "startpage":   lambda: search_startpage(query, filetypes, max_results, pm, pq),
+        "mojeek":      lambda: search_mojeek(query, filetypes, max_results, pm, pq),
         "commoncrawl": lambda: search_commoncrawl(query, filetypes, max_results),
         "archive":     lambda: search_archive_org(query, filetypes, max_results),
     }
@@ -1022,7 +1064,7 @@ def search():
             future_to_engine = {pool.submit(fn): eng for eng, fn in active.items()}
 
             for eng in active:
-                yield _sse({"type": "engine_start", "engine": eng})
+                yield _sse({"type": "engine_start", "engine": eng, "ts": time.time()})
 
             def _proxy_info():
                 return (
@@ -1030,6 +1072,14 @@ def search():
                      "proxies_burned": proxy_manager.burned_count}
                     if proxy_manager else {}
                 )
+
+            def _drain_progress():
+                """Yield all pending progress events from the queue."""
+                while True:
+                    try:
+                        yield _sse(pq.get_nowait())
+                    except queue.Empty:
+                        break
 
             def _emit_engine_result(future, eng):
                 nonlocal total
@@ -1068,22 +1118,32 @@ def search():
                         **_proxy_info(),
                     })
 
-            try:
-                for future in concurrent.futures.as_completed(future_to_engine, timeout=120):
-                    yield _emit_engine_result(future, future_to_engine[future])
-            except TimeoutError:
-                # Some engines didn't finish in time — report them and move on
-                for future, eng in future_to_engine.items():
-                    if not future.done():
+            # Poll the progress queue every 500 ms while waiting for engines
+            deadline = time.time() + 120
+            remaining = set(future_to_engine.keys())
+            while remaining:
+                yield from _drain_progress()
+
+                time_left = deadline - time.time()
+                if time_left <= 0:
+                    for future in remaining:
                         future.cancel()
-                        yield _sse({
-                            "type":        "engine_error",
-                            "engine":      eng,
-                            "error":       "Timed out — engine took too long to respond",
-                            "rate_limited": False,
-                            "total":       total,
-                            **_proxy_info(),
-                        })
+                        yield _sse({"type": "engine_error",
+                                    "engine": future_to_engine[future],
+                                    "error": "Timed out", "rate_limited": False,
+                                    "total": total, **_proxy_info()})
+                    remaining.clear()
+                    break
+
+                done, _ = concurrent.futures.wait(
+                    remaining, timeout=min(0.5, time_left),
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    remaining.discard(future)
+                    yield _emit_engine_result(future, future_to_engine[future])
+
+            yield from _drain_progress()  # final flush
 
         # ── Phase 2: crawl result pages for actual file links ────────────
         if deep_crawl and all_pages:
