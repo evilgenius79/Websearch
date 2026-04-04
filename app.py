@@ -94,6 +94,10 @@ FILE_EXTENSIONS = {
         "rtf": "RTF",
         "txt": "TXT",
         "tex": "LaTeX",
+        "epub": "EPUB",
+        "mobi": "MOBI",
+        "azw3": "AZW3",
+        "djvu": "DjVu",
     },
     "Spreadsheets": {
         "xls": "XLS",
@@ -106,12 +110,6 @@ FILE_EXTENSIONS = {
         "pptx": "PPTX",
         "odp": "ODP",
         "key": "Keynote",
-    },
-    "eBooks": {
-        "epub": "EPUB",
-        "mobi": "MOBI",
-        "azw3": "AZW3",
-        "djvu": "DjVu",
     },
     "Archives": {
         "zip": "ZIP",
@@ -522,22 +520,54 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_
                 soup = BeautifulSoup(r.text, "html.parser")
                 found = 0
 
-                for tag in soup.select("div.algo, div.dd"):
-                    a = tag.select_one("h3 a") or tag.select_one("a")
+                # Yahoo changes its HTML structure frequently — try multiple
+                # selector strategies from most to least specific
+                containers = (
+                    soup.select("div.algo") or
+                    soup.select("div[class*='algo']") or
+                    soup.select("ol#web li") or
+                    soup.select("li.first") or
+                    []
+                )
+                containers += soup.select("div.dd")  # always include dd results
+
+                for tag in containers:
+                    a = (
+                        tag.select_one("h3.title a") or
+                        tag.select_one(".compTitle a") or
+                        tag.select_one("h3 a") or
+                        tag.select_one("a[href*='r.search.yahoo.com']") or
+                        tag.select_one("a[href^='http']")
+                    )
                     if not a:
                         continue
                     href = a.get("href", "")
+
+                    # Unwrap Yahoo redirect URLs (multiple known formats)
                     if "/RU=" in href:
                         m = re.search(r"/RU=([^/]+)/", href)
                         if m:
                             href = unquote(m.group(1))
+                    elif "r.search.yahoo.com" in href:
+                        for param in ("RU", "u", "url"):
+                            m = re.search(rf'[?&/]{re.escape(param)}=([^&/]+)', href)
+                            if m:
+                                decoded = unquote(m.group(1))
+                                if decoded.startswith("http"):
+                                    href = decoded
+                                    break
+
                     if not href.startswith("http"):
                         continue
                     if href in seen:
                         continue
                     seen.add(href)
                     title = a.get_text(strip=True)
-                    snippet_el = tag.select_one(".compText") or tag.select_one("p")
+                    snippet_el = (
+                        tag.select_one(".compText") or
+                        tag.select_one(".st") or
+                        tag.select_one("p")
+                    )
                     snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
                     if is_direct_link(href, [ft]):

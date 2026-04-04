@@ -876,13 +876,15 @@
       </div>
     </details>
 
-    <!-- Search button -->
-    <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-        <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-      </svg>
-      Search
-    </button>
+    <!-- Search button (sticky so it's always reachable regardless of sidebar length) -->
+    <div style="position:sticky;bottom:0;background:var(--surface);padding:.6rem 0 .25rem;margin-top:auto;">
+      <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+        </svg>
+        Search
+      </button>
+    </div>
 
   </aside>
 
@@ -985,6 +987,13 @@ let allResults = [];
 let sortKey = 'engine';
 let sortAsc  = true;
 let searchAbort = null;
+
+/* ── Deep crawl toggle → show/hide max-crawl row ─────────────────────── */
+const deepCrawlCb  = document.getElementById('deep-crawl');
+const maxCrawlRow  = document.getElementById('max-crawl-row');
+deepCrawlCb.addEventListener('change', () => {
+  maxCrawlRow.style.display = deepCrawlCb.checked ? '' : 'none';
+});
 
 /* ── Engine chips ─────────────────────────────────────────────────────── */
 document.querySelectorAll('.engine-chip').forEach(chip => {
