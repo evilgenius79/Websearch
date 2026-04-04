@@ -8,30 +8,7 @@ A self-hosted web application that fires filetype dork queries at multiple searc
 
 ## Screenshot
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│  🔍 Multi-Engine File Search                                                    │
-│  Aggressive parallel search · deep page crawl · direct download links only     │
-├──────────────────────┬──────────────────────────────────────────────────────────┤
-│  Search Query        │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  Progress      │
-│  ─────────────────   │                                                           │
-│  Options             │  Searching 3 of 7 engines…        47 links found         │
-│  Max results:  60    │  ┌────────────────────────────────────────────────────┐  │
-│  Max crawl:    80    │  │ ⠋ Bing           12 direct, 8 pages                │  │
-│  [⊙] Deep crawl      │  │ ✓ DuckDuckGo     0 direct, 14 pages                │  │
-│                      │  │ ✓ Yahoo          3 direct, 6 pages                 │  │
-│  Engines             │  │ ⠋ Common Crawl   Searching…                        │  │
-│  ● Bing  ● DDG ...   │  │ Crawling pages… 34/80          [████████░░░░░░░░]  │  │
-│                      │  └────────────────────────────────────────────────────┘  │
-│  File Types          │                                                           │
-│  [✓] Documents  ▶    │  # Filename        Domain    Type  Engine       Actions  │
-│  [✓] ECU Tunes  ▶    │  tune.hpt          forum..   HPT   Bing(crawled) Copy   │
-│  [ ] Archives   ▶    │  map.bin           site.com  BIN   DDG(crawled)  Copy   │
-│                      │  report.pdf        gov.uk    PDF   Archive       Copy   │
-│  [⊙] Proxies    ▶    │  [ Filter… ] [Sort ▾] [⬇ CSV] [⬇ URLs] [⬇ JSON]         │
-│  [  Search  ]        │  Proxies: 142 active, 3 burned                           │
-└──────────────────────┴──────────────────────────────────────────────────────────┘
-```
+![Multi-Engine File Search — live search with proxy panel open](screenshot.png)
 
 ---
 
