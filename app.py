@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory, stream_with_context
 
 app = Flask(__name__)
 
@@ -897,6 +897,11 @@ def search_mojeek(query: str, filetypes: list[str], max_results: int = 40, proxy
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory("static", "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
 
 @app.route("/")
