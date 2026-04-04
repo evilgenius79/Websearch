@@ -901,7 +901,7 @@ def search_mojeek(query: str, filetypes: list[str], max_results: int = 40, proxy
 
 @app.route("/favicon.ico")
 def favicon():
-    return send_from_directory("static", "favicon.ico", mimetype="image/vnd.microsoft.icon")
+    return app.send_static_file("favicon.ico")
 
 
 @app.route("/")
