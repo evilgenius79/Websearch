@@ -821,6 +821,9 @@
         <div class="engine-chip requires-key" data-engine="searxng" title="Requires SearXNG instance URL">
           <span class="dot"></span>SearXNG ✦
         </div>
+        <div class="engine-chip requires-key" data-engine="filepursuit" title="Requires FilePursuit RapidAPI key — indexes open directories">
+          <span class="dot"></span>FilePursuit ✦
+        </div>
       </div>
     </div>
 
@@ -866,6 +869,10 @@
         <div>
           <label>SearXNG Instance URL</label>
           <input id="searxng-url" type="text" placeholder="https://searx.example.com" />
+        </div>
+        <div>
+          <label>FilePursuit RapidAPI Key (<a href="https://rapidapi.com/azharxes/api/filepursuit" target="_blank" rel="noopener">get key</a>)</label>
+          <input id="filepursuit-key" type="password" placeholder="RapidAPI key..." autocomplete="off" />
         </div>
       </div>
     </details>
@@ -1190,10 +1197,11 @@ async function runSearch() {
     max_results:    getMaxResults(),
     deep_crawl:     document.getElementById('deep-crawl').checked,
     max_crawl:      parseInt(document.getElementById('max-crawl').value) || 80,
-    google_api_key: document.getElementById('google-api-key').value.trim(),
-    google_cx:      document.getElementById('google-cx').value.trim(),
-    searxng_url:    document.getElementById('searxng-url').value.trim(),
-    proxies:        getProxies(),
+    google_api_key:  document.getElementById('google-api-key').value.trim(),
+    google_cx:       document.getElementById('google-cx').value.trim(),
+    searxng_url:     document.getElementById('searxng-url').value.trim(),
+    filepursuit_key: document.getElementById('filepursuit-key').value.trim(),
+    proxies:         getProxies(),
   };
 
   // Reset proxy runtime display

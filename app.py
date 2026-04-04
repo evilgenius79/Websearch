@@ -81,15 +81,97 @@ class ProxyManager:
 # Constants
 # ---------------------------------------------------------------------------
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.3; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/123.0.0.0 Safari/537.36",
+# ---------------------------------------------------------------------------
+# Browser profiles — UA string paired with matching Sec-CH-UA / Sec-Fetch
+# headers that real browsers actually send.  Mixing mismatched headers is a
+# strong scraper fingerprint; keeping them coherent reduces blocks.
+# ---------------------------------------------------------------------------
+
+_BROWSER_PROFILES = [
+    # Chrome 124 Windows
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    },
+    # Chrome 124 macOS
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"macOS"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    },
+    # Edge 124 Windows
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-CH-UA": '"Chromium";v="124", "Microsoft Edge";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    },
+    # Firefox 125 Windows (no Sec-CH-UA — FF doesn't send it)
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+    },
+    # Firefox 125 macOS
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+    },
+    # Chrome 124 Linux
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Linux"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    },
 ]
+
+# Keep a flat list of UA strings for places that only need the string
+USER_AGENTS = [p["User-Agent"] for p in _BROWSER_PROFILES]
 
 FILE_EXTENSIONS = {
     "Documents": {
@@ -206,17 +288,15 @@ def _check_response(r: "requests.Response", engine: str) -> None:
 
 
 def get_headers(referer: str = "https://www.google.com") -> dict:
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        # Do NOT set Accept-Encoding — let requests handle it so it only
-        # advertises encodings it can actually decompress (avoids brotli garbage)
-        "Referer": referer,
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
+    """Return a coherent browser profile (UA + matching Sec-CH-UA / Sec-Fetch headers).
+    Do NOT set Accept-Encoding — let requests advertise only what it can decompress
+    (avoids brotli garbage returned from servers that honour the header).
+    """
+    profile = dict(random.choice(_BROWSER_PROFILES))  # copy so we can mutate
+    if referer:
+        profile["Referer"] = referer
+    profile["Connection"] = "keep-alive"
+    return profile
 
 
 def is_direct_link(url: str, filetypes: list[str]) -> bool:
@@ -247,6 +327,23 @@ def make_page_hit(url: str, title: str, snippet: str, engine: str, filetype: str
         "engine": engine,
         "filetype": filetype,
     }
+
+
+def build_dorks(query: str, ft: str) -> list[str]:
+    """Return a list of dork queries for a single filetype, from most to least specific.
+
+    Combining operators increases result diversity:
+      - filetype: / ext:  — standard file-type filter
+      - intitle:"index of" — open directory listings
+      - inurl:download     — explicit download pages
+    Not all engines support all operators; extras are silently ignored.
+    """
+    q = query.strip()
+    return [
+        f'filetype:{ft} {q}',
+        f'"{q}" filetype:{ft} intitle:"index of"',
+        f'filetype:{ft} {q} inurl:download',
+    ]
 
 
 def _proxy_display(proxy_manager: "ProxyManager | None") -> str | None:
@@ -404,118 +501,183 @@ def search_bing(query: str, filetypes: list[str], max_results: int = 60, proxy_m
     per_type = max(10, max_results // max(len(filetypes), 1))
 
     for ft in filetypes:
-        dork = f'filetype:{ft} {query}'
-        page_count = min(5, (per_type + 9) // 10)
+        dorks = build_dorks(query, ft)
+        pages_per_dork = max(2, per_type // 10 // len(dorks))
 
-        for page in range(page_count):
-            try:
-                if progress_q:
-                    progress_q.put_nowait({"type": "engine_progress", "engine": "Bing",
-                        "filetype": ft, "page": page + 1, "pages": page_count,
-                        "proxy": _proxy_display(proxy_manager)})
-                params = {"q": dork, "first": page * 10 + 1, "count": 10}
-                r = _req(
-                    "GET",
-                    "https://www.bing.com/search",
-                    proxy_manager=proxy_manager,
-                    engine="Bing",
-                    params=params,
-                    headers=get_headers("https://www.bing.com"),
-                    timeout=12,
-                )
-                if r.status_code != 200:
+        for dork in dorks:
+            for page in range(pages_per_dork):
+                try:
+                    if progress_q:
+                        progress_q.put_nowait({"type": "engine_progress", "engine": "Bing",
+                            "filetype": ft, "page": page + 1, "pages": pages_per_dork,
+                            "proxy": _proxy_display(proxy_manager)})
+                    params = {"q": dork, "first": page * 10 + 1, "count": 10}
+                    r = _req(
+                        "GET",
+                        "https://www.bing.com/search",
+                        proxy_manager=proxy_manager,
+                        engine="Bing",
+                        params=params,
+                        headers=get_headers("https://www.bing.com"),
+                        timeout=12,
+                    )
+                    if r.status_code != 200:
+                        break
+
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    found = 0
+
+                    for tag in soup.select("li.b_algo"):
+                        a = tag.select_one("h2 a") or tag.select_one("a")
+                        if not a:
+                            continue
+                        href = a.get("href", "")
+                        if not href.startswith("http"):
+                            continue
+                        if href in seen:
+                            continue
+                        seen.add(href)
+                        title = a.get_text(strip=True)
+                        snippet_el = tag.select_one(".b_caption p") or tag.select_one("p")
+                        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                        if is_direct_link(href, [ft]):
+                            results.append(make_result(href, title, snippet, "Bing", ft))
+                        else:
+                            alt = a.get("data-href", "")
+                            if alt and is_direct_link(alt, [ft]):
+                                results.append(make_result(alt, title, snippet, "Bing", ft))
+                            else:
+                                pages.append(make_page_hit(href, title, snippet, "Bing", ft))
+                        found += 1
+
+                    if found == 0:
+                        break
+                    jitter()
+                except RateLimitedError:
+                    raise
+                except Exception:
                     break
 
-                soup = BeautifulSoup(r.text, "html.parser")
-                found = 0
+    return results, pages
 
-                for tag in soup.select("li.b_algo"):
-                    a = tag.select_one("h2 a") or tag.select_one("a")
+
+def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
+    # DuckDuckGo removed filetype:/ext: operator support in April 2023.
+    # site: still works reliably, so we use open-directory dork patterns
+    # (intitle:"index of") combined with extension keywords instead.
+    results, pages, seen = [], [], set()
+
+    for ft in filetypes:
+        # Two complementary dork strategies:
+        # 1. Open-directory listing pages that expose files directly
+        # 2. Plain keyword + extension search (catches download pages)
+        dorks = [
+            f'intitle:"index of" ".{ft}" {query}',
+            f'{query} ".{ft}"',
+        ]
+
+        for dork_idx, dork in enumerate(dorks):
+            try:
+                if progress_q:
+                    progress_q.put_nowait({"type": "engine_progress", "engine": "DuckDuckGo",
+                        "filetype": ft, "page": dork_idx + 1, "pages": len(dorks),
+                        "proxy": _proxy_display(proxy_manager)})
+                # POST to the HTML lite endpoint (GET ignores the data= body)
+                r = _req(
+                    "POST",
+                    "https://html.duckduckgo.com/html/",
+                    proxy_manager=proxy_manager,
+                    engine="DuckDuckGo",
+                    data={"q": dork, "b": "", "kl": "us-en"},
+                    headers={**get_headers("https://duckduckgo.com"),
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=15,
+                )
+                if r.status_code != 200:
+                    continue
+
+                soup = BeautifulSoup(r.text, "html.parser")
+
+                for result in soup.select(".result"):
+                    a = result.select_one(".result__title a") or result.select_one("a.result__url")
                     if not a:
                         continue
                     href = a.get("href", "")
+                    if "uddg=" in href:
+                        m2 = re.search(r'uddg=([^&]+)', href)
+                        if m2:
+                            href = unquote(m2.group(1))
                     if not href.startswith("http"):
                         continue
                     if href in seen:
                         continue
                     seen.add(href)
                     title = a.get_text(strip=True)
-                    snippet_el = tag.select_one(".b_caption p") or tag.select_one("p")
+                    snippet_el = result.select_one(".result__snippet")
                     snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
                     if is_direct_link(href, [ft]):
-                        results.append(make_result(href, title, snippet, "Bing", ft))
+                        results.append(make_result(href, title, snippet, "DuckDuckGo", ft))
                     else:
-                        # Also try data-href
-                        alt = a.get("data-href", "")
-                        if alt and is_direct_link(alt, [ft]):
-                            results.append(make_result(alt, title, snippet, "Bing", ft))
-                        else:
-                            pages.append(make_page_hit(href, title, snippet, "Bing", ft))
-                    found += 1
-
-                if found == 0:
-                    break
-                jitter()
+                        pages.append(make_page_hit(href, title, snippet, "DuckDuckGo", ft))
+                jitter(1.0, 2.5)
             except RateLimitedError:
-                raise  # propagate so the route can report it
+                raise
             except Exception:
-                break
+                continue
 
     return results, pages
 
 
-def search_duckduckgo(query: str, filetypes: list[str], max_results: int = 60, proxy_manager: "ProxyManager | None" = None, progress_q: "queue.SimpleQueue | None" = None) -> tuple[list[dict], list[dict]]:
+def search_filepursuit(query: str, filetypes: list[str], api_key: str, max_results: int = 60) -> tuple[list[dict], list[dict]]:
+    """FilePursuit open-directory index via RapidAPI.
+
+    API key obtained at: https://rapidapi.com/azharxes/api/filepursuit
+    Free tier: 100 requests/day.
+    """
     results, pages, seen = [], [], set()
+    if not api_key:
+        return results, pages
+
+    # FilePursuit type parameter mapping
+    _FT_TYPE = {
+        "pdf": "ebook", "epub": "ebook", "mobi": "ebook", "djvu": "ebook",
+        "mp3": "audio", "flac": "audio", "ogg": "audio", "wav": "audio", "aac": "audio",
+        "mp4": "video", "mkv": "video", "avi": "video", "mov": "video", "webm": "video",
+        "zip": "archive", "rar": "archive", "7z": "archive", "tar": "archive", "gz": "archive",
+    }
+
+    per_type = max(10, max_results // max(len(filetypes), 1))
 
     for ft in filetypes:
-        dork = f'filetype:{ft} {query}'
+        fp_type = _FT_TYPE.get(ft, "general")
         try:
-            if progress_q:
-                progress_q.put_nowait({"type": "engine_progress", "engine": "DuckDuckGo",
-                    "filetype": ft, "page": 1, "pages": 1,
-                    "proxy": _proxy_display(proxy_manager)})
-            # POST to the HTML lite endpoint (GET ignores the data= body)
-            r = _req(
-                "POST",
-                "https://html.duckduckgo.com/html/",
-                proxy_manager=proxy_manager,
-                engine="DuckDuckGo",
-                data={"q": dork, "b": "", "kl": "us-en"},
-                headers={**get_headers("https://duckduckgo.com"),
-                         "Content-Type": "application/x-www-form-urlencoded"},
+            params = {"q": f"{query} {ft}", "type": fp_type}
+            r = requests.get(
+                "https://filepursuit.p.rapidapi.com/",
+                params=params,
+                headers={
+                    "x-rapidapi-host": "filepursuit.p.rapidapi.com",
+                    "x-rapidapi-key": api_key,
+                },
                 timeout=15,
             )
             if r.status_code != 200:
                 continue
-
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            for result in soup.select(".result"):
-                a = result.select_one(".result__title a") or result.select_one("a.result__url")
-                if not a:
-                    continue
-                href = a.get("href", "")
-                if "uddg=" in href:
-                    m2 = re.search(r'uddg=([^&]+)', href)
-                    if m2:
-                        href = unquote(m2.group(1))
-                if not href.startswith("http"):
-                    continue
-                if href in seen:
+            data = r.json()
+            for item in data.get("files_found", [])[:per_type]:
+                href = item.get("file_link", "")
+                if not href or href in seen:
                     continue
                 seen.add(href)
-                title = a.get_text(strip=True)
-                snippet_el = result.select_one(".result__snippet")
-                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-
+                name = item.get("file_name", "")
+                size = item.get("file_size_bytes", 0)
+                snippet = f"{name} ({size // 1024:,} KB)" if size else name
                 if is_direct_link(href, [ft]):
-                    results.append(make_result(href, title, snippet, "DuckDuckGo", ft))
+                    results.append(make_result(href, name, snippet, "FilePursuit", ft))
                 else:
-                    pages.append(make_page_hit(href, title, snippet, "DuckDuckGo", ft))
-            jitter(1.0, 2.5)
-        except RateLimitedError:
-            raise
+                    pages.append(make_page_hit(href, name, snippet, "FilePursuit", ft))
         except Exception:
             continue
 
@@ -527,94 +689,95 @@ def search_yahoo(query: str, filetypes: list[str], max_results: int = 60, proxy_
     per_type = max(10, max_results // max(len(filetypes), 1))
 
     for ft in filetypes:
-        dork = f'filetype:{ft} {query}'
-        page_count = min(4, (per_type + 9) // 10)
+        dorks = build_dorks(query, ft)
+        pages_per_dork = max(1, min(3, per_type // 10 // len(dorks)))
 
-        for page in range(page_count):
-            try:
-                if progress_q:
-                    progress_q.put_nowait({"type": "engine_progress", "engine": "Yahoo",
-                        "filetype": ft, "page": page + 1, "pages": page_count,
-                        "proxy": _proxy_display(proxy_manager)})
-                params = {"p": dork, "b": page * 10 + 1, "pz": 10}
-                r = _req(
-                    "GET",
-                    "https://search.yahoo.com/search",
-                    proxy_manager=proxy_manager,
-                    engine="Yahoo",
-                    params=params,
-                    headers=get_headers("https://search.yahoo.com"),
-                    timeout=12,
-                )
-                if r.status_code != 200:
-                    break
-
-                soup = BeautifulSoup(r.text, "html.parser")
-                found = 0
-
-                # Yahoo changes its HTML structure frequently — try multiple
-                # selector strategies from most to least specific
-                containers = (
-                    soup.select("div.algo") or
-                    soup.select("div[class*='algo']") or
-                    soup.select("ol#web li") or
-                    soup.select("li.first") or
-                    []
-                )
-                containers += soup.select("div.dd")  # always include dd results
-
-                for tag in containers:
-                    a = (
-                        tag.select_one("h3.title a") or
-                        tag.select_one(".compTitle a") or
-                        tag.select_one("h3 a") or
-                        tag.select_one("a[href*='r.search.yahoo.com']") or
-                        tag.select_one("a[href^='http']")
+        for dork in dorks:
+            for page in range(pages_per_dork):
+                try:
+                    if progress_q:
+                        progress_q.put_nowait({"type": "engine_progress", "engine": "Yahoo",
+                            "filetype": ft, "page": page + 1, "pages": pages_per_dork,
+                            "proxy": _proxy_display(proxy_manager)})
+                    params = {"p": dork, "b": page * 10 + 1, "pz": 10}
+                    r = _req(
+                        "GET",
+                        "https://search.yahoo.com/search",
+                        proxy_manager=proxy_manager,
+                        engine="Yahoo",
+                        params=params,
+                        headers=get_headers("https://search.yahoo.com"),
+                        timeout=12,
                     )
-                    if not a:
-                        continue
-                    href = a.get("href", "")
+                    if r.status_code != 200:
+                        break
 
-                    # Unwrap Yahoo redirect URLs (multiple known formats)
-                    if "/RU=" in href:
-                        m = re.search(r"/RU=([^/]+)/", href)
-                        if m:
-                            href = unquote(m.group(1))
-                    elif "r.search.yahoo.com" in href:
-                        for param in ("RU", "u", "url"):
-                            m = re.search(rf'[?&/]{re.escape(param)}=([^&/]+)', href)
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    found = 0
+
+                    # Yahoo changes its HTML structure frequently — try multiple
+                    # selector strategies from most to least specific
+                    containers = (
+                        soup.select("div.algo") or
+                        soup.select("div[class*='algo']") or
+                        soup.select("ol#web li") or
+                        soup.select("li.first") or
+                        []
+                    )
+                    containers += soup.select("div.dd")  # always include dd results
+
+                    for tag in containers:
+                        a = (
+                            tag.select_one("h3.title a") or
+                            tag.select_one(".compTitle a") or
+                            tag.select_one("h3 a") or
+                            tag.select_one("a[href*='r.search.yahoo.com']") or
+                            tag.select_one("a[href^='http']")
+                        )
+                        if not a:
+                            continue
+                        href = a.get("href", "")
+
+                        # Unwrap Yahoo redirect URLs (multiple known formats)
+                        if "/RU=" in href:
+                            m = re.search(r"/RU=([^/]+)/", href)
                             if m:
-                                decoded = unquote(m.group(1))
-                                if decoded.startswith("http"):
-                                    href = decoded
-                                    break
+                                href = unquote(m.group(1))
+                        elif "r.search.yahoo.com" in href:
+                            for param in ("RU", "u", "url"):
+                                m = re.search(rf'[?&/]{re.escape(param)}=([^&/]+)', href)
+                                if m:
+                                    decoded = unquote(m.group(1))
+                                    if decoded.startswith("http"):
+                                        href = decoded
+                                        break
 
-                    if not href.startswith("http"):
-                        continue
-                    if href in seen:
-                        continue
-                    seen.add(href)
-                    title = a.get_text(strip=True)
-                    snippet_el = (
-                        tag.select_one(".compText") or
-                        tag.select_one(".st") or
-                        tag.select_one("p")
-                    )
-                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                        if not href.startswith("http"):
+                            continue
+                        if href in seen:
+                            continue
+                        seen.add(href)
+                        title = a.get_text(strip=True)
+                        snippet_el = (
+                            tag.select_one(".compText") or
+                            tag.select_one(".st") or
+                            tag.select_one("p")
+                        )
+                        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
-                    if is_direct_link(href, [ft]):
-                        results.append(make_result(href, title, snippet, "Yahoo", ft))
-                    else:
-                        page_hits.append(make_page_hit(href, title, snippet, "Yahoo", ft))
-                    found += 1
+                        if is_direct_link(href, [ft]):
+                            results.append(make_result(href, title, snippet, "Yahoo", ft))
+                        else:
+                            page_hits.append(make_page_hit(href, title, snippet, "Yahoo", ft))
+                        found += 1
 
-                if found == 0:
+                    if found == 0:
+                        break
+                    jitter()
+                except RateLimitedError:
+                    raise
+                except Exception:
                     break
-                jitter()
-            except RateLimitedError:
-                raise
-            except Exception:
-                break
 
     return results, page_hits
 
@@ -1016,6 +1179,7 @@ def search():
     google_api_key = data.get("google_api_key", "").strip()
     google_cx = data.get("google_cx", "").strip()
     searxng_url = data.get("searxng_url", "").strip()
+    filepursuit_key = data.get("filepursuit_key", "").strip()
 
     # Optional proxy list
     raw_proxies = [p.strip() for p in data.get("proxies", []) if isinstance(p, str) and p.strip()]
@@ -1045,6 +1209,8 @@ def search():
         TASKS["google"] = lambda: search_google_cse(query, filetypes, google_api_key, google_cx, max_results)
     if "searxng" in engines and searxng_url:
         TASKS["searxng"] = lambda: search_searxng(query, filetypes, searxng_url, max_results)
+    if "filepursuit" in engines and filepursuit_key:
+        TASKS["filepursuit"] = lambda: search_filepursuit(query, filetypes, filepursuit_key, max_results)
 
     active = {k: v for k, v in TASKS.items() if k in engines}
 
